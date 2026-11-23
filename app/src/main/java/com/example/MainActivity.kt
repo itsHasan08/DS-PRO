@@ -31,10 +31,6 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.light(Color.WHITE, Color.WHITE),
             navigationBarStyle = SystemBarStyle.light(Color.WHITE, Color.WHITE),
         )
-        WindowCompat.getInsetsController(window, window.decorView).apply {
-            isAppearanceLightStatusBars = true
-            isAppearanceLightNavigationBars = true
-        }
         setContent {
             DsProTheme {
                 MainScreen(viewModel = viewModel)

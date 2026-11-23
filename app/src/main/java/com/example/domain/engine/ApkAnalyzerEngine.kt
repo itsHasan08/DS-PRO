@@ -37,8 +37,8 @@ class ApkAnalyzerEngine(private val context: Context) {
             val targetFile = File(workDir, "input_${System.currentTimeMillis()}_$sanitizedName")
 
             context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(targetFile).use { output ->
-                    val buffer = ByteArray(16 * 1024)
+                java.io.BufferedOutputStream(FileOutputStream(targetFile), 128 * 1024).use { output ->
+                    val buffer = ByteArray(128 * 1024)
                     var read: Int
                     while (input.read(buffer).also { read = it } != -1) {
                         output.write(buffer, 0, read)
@@ -97,7 +97,6 @@ class ApkAnalyzerEngine(private val context: Context) {
         var hasManifest = false
         var manifestSummary: AxmlSecuritySummary? = null
         var dexCount = 0
-        var logCallMatches = 0
 
         ZipFile(apkFile).use { zip ->
             val entries = zip.entries()
@@ -113,20 +112,6 @@ class ApkAnalyzerEngine(private val context: Context) {
                     }
                 } else if (name.startsWith("classes") && name.endsWith(".dex") && name.indexOf('/') == -1) {
                     dexCount++
-                    zip.getInputStream(entry).use { stream ->
-                        val maxScanBytes = 2 * 1024 * 1024
-                        var scanned = 0
-                        val chunk = ByteArray(32 * 1024)
-                        var tail = ""
-                        while (scanned < maxScanBytes) {
-                            val n = stream.read(chunk, 0, min(chunk.size, maxScanBytes - scanned))
-                            if (n <= 0) break
-                            scanned += n
-                            val text = tail + String(chunk, 0, n, Charsets.ISO_8859_1)
-                            logCallMatches += countOccurrences(text, "Landroid/util/Log;")
-                            tail = if (text.length > 32) text.takeLast(32) else text
-                        }
-                    }
                 }
             }
         }
@@ -150,7 +135,7 @@ class ApkAnalyzerEngine(private val context: Context) {
             fileSizeBytes = apkFile.length(),
             totalEntries = totalEntries,
             dexCount = dexCount,
-            logCallMatches = logCallMatches,
+            logCallMatches = 0,
             signingCertSha256 = certSha256,
             isSigned = isSigned,
             isDebuggable = manifestSummary?.isDebuggable ?: false,

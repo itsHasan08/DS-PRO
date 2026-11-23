@@ -191,7 +191,6 @@ class ApkProtectionProcessor(
             val guards = buildList {
                 if (config.detectRoot) add("Root")
                 if (config.detectEmulator) add("Emulator")
-                if (config.detectVpn) add("VPN")
                 if (config.detectXposed) add("Xposed/Frida")
                 if (config.detectDebugger) add("Debugger")
                 if (config.antiScreenshot) add("Anti-Screenshot")
@@ -287,8 +286,10 @@ class ApkProtectionProcessor(
         const val CORE_DEX_ASSET = "ds_pro_core.dex"
         const val GUARD_POLICY_ASSET = "assets/dspro_guard.bin"
         const val CORE_CONTAINER_ASSET = "assets/dspro_core.bin"
+        const val PACKER_MARKER_ASSET = "assets/libjiagu.so"
         private const val GUARD_DESCRIPTOR = "Lcom/dspro/guard/DsProGuardProvider;"
-        private const val CORE_DESCRIPTOR = "Lcom/dspro/core/DsProApplication;"
+        private const val CORE_DESCRIPTOR = "Lcom/stub/StubApp;"
+        private const val LEGACY_CORE_DESCRIPTOR = "Lcom/dspro/core/DsProApplication;"
 
         fun guardConfigAssetPath(packageName: String): String = GUARD_POLICY_ASSET
 
@@ -328,9 +329,10 @@ class ApkProtectionProcessor(
             var manifestBytes: ByteArray? = null
 
             ZipFile(inputFile).use { zipIn ->
-                val countingOut = CountingOutputStream(BufferedOutputStream(FileOutputStream(outputFile), 64 * 1024))
+                val countingOut = CountingOutputStream(BufferedOutputStream(FileOutputStream(outputFile), 128 * 1024))
+                val copyBuf = ByteArray(64 * 1024)
                 ZipOutputStream(countingOut).use { zipOut ->
-                    zipOut.setLevel(if (config.bestCompression) Deflater.BEST_COMPRESSION else Deflater.DEFAULT_COMPRESSION)
+                    zipOut.setLevel(if (config.bestCompression) Deflater.BEST_COMPRESSION else Deflater.BEST_SPEED)
                     val written = hashSetOf<String>()
 
                     val rawManifestEntry = zipIn.getEntry("AndroidManifest.xml")
@@ -359,6 +361,7 @@ class ApkProtectionProcessor(
                         if (isV1SignatureEntry(name) ||
                             name.startsWith("assets/ds_pro_") ||
                             name.startsWith("assets/dspro_") ||
+                            name == PACKER_MARKER_ASSET ||
                             name == guardAssetName ||
                             name == coreAssetName
                         ) {
@@ -369,10 +372,13 @@ class ApkProtectionProcessor(
                             continue
                         }
 
-                        val rawBytes = zipIn.getInputStream(entry).use { it.readBytes() }
-
                         if (isClassesDex(name)) {
-                            if (inputHasCoreProtection && DexPatcher.containsAsciiMarker(rawBytes, CORE_DESCRIPTOR)) {
+                            val rawBytes = zipIn.getInputStream(entry).use { it.readBytes() }
+                            if (inputHasCoreProtection && (
+                                    DexPatcher.containsAsciiMarker(rawBytes, CORE_DESCRIPTOR) ||
+                                        DexPatcher.containsAsciiMarker(rawBytes, LEGACY_CORE_DESCRIPTOR)
+                                    )
+                            ) {
                                 continue
                             }
                             if (inputHasGuardProvider && DexPatcher.containsAsciiMarker(rawBytes, GUARD_DESCRIPTOR)) {
@@ -389,16 +395,49 @@ class ApkProtectionProcessor(
                         }
 
                         if (name == "AndroidManifest.xml") {
-                            manifestBytes = rawBytes
+                            manifestBytes = zipIn.getInputStream(entry).use { it.readBytes() }
                             continue
                         }
 
                         val shouldPreserveStored = entry.method == ZipEntry.STORED ||
                             name == "resources.arsc" ||
                             name.endsWith(".so")
-                        if (writeZipBytes(countingOut, zipOut, written, name, rawBytes, keepStored = shouldPreserveStored)) {
-                            if (config.antiTampering && isIntegrityTrackedEntry(name)) {
-                                integrityLines += "${sha256Hex(rawBytes)}|$name"
+                        val trackIntegrity = config.antiTampering && isIntegrityTrackedEntry(name)
+                        if (shouldPreserveStored && entry.size >= 0 && entry.crc >= 0) {
+                            val digest = streamStoredZipEntry(
+                                countingOut = countingOut,
+                                zipOut = zipOut,
+                                written = written,
+                                name = name,
+                                size = entry.size,
+                                crc = entry.crc,
+                                zipIn = zipIn,
+                                entry = entry,
+                                copyBuf = copyBuf,
+                                computeSha256 = trackIntegrity,
+                            )
+                            if (digest != null) {
+                                integrityLines += "$digest|$name"
+                            }
+                        } else if (shouldPreserveStored) {
+                            val rawBytes = zipIn.getInputStream(entry).use { it.readBytes() }
+                            if (writeZipBytes(countingOut, zipOut, written, name, rawBytes, keepStored = true)) {
+                                if (trackIntegrity) {
+                                    integrityLines += "${sha256Hex(rawBytes)}|$name"
+                                }
+                            }
+                        } else {
+                            val digest = streamDeflatedZipEntry(
+                                zipOut = zipOut,
+                                written = written,
+                                name = name,
+                                zipIn = zipIn,
+                                entry = entry,
+                                copyBuf = copyBuf,
+                                computeSha256 = trackIntegrity,
+                            )
+                            if (digest != null) {
+                                integrityLines += "$digest|$name"
                             }
                         }
                     }
@@ -454,6 +493,13 @@ class ApkProtectionProcessor(
                         if (writeZipBytes(countingOut, zipOut, written, coreAssetName, coreContainerBytes)) {
                             if (config.antiTampering) {
                                 integrityLines += "${sha256Hex(coreContainerBytes)}|$coreAssetName"
+                            }
+                        }
+
+                        val packerMarkerBytes = buildPackerMarkerStub(effectivePackageName)
+                        if (writeZipBytes(countingOut, zipOut, written, PACKER_MARKER_ASSET, packerMarkerBytes)) {
+                            if (config.antiTampering) {
+                                integrityLines += "${sha256Hex(packerMarkerBytes)}|$PACKER_MARKER_ASSET"
                             }
                         }
 
@@ -548,10 +594,10 @@ class ApkProtectionProcessor(
                 append(if (requireGuard) "1" else "0")
             }.toByteArray(Charsets.UTF_8)
 
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             val metaIv = ByteArray(12).also { rng.nextBytes(it) }
-            val metaCipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(Cipher.ENCRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
-            }.doFinal(metaPlain)
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
+            val metaCipher = cipher.doFinal(metaPlain)
 
             val out = ByteArrayOutputStream()
             DataOutputStream(out).use { dos ->
@@ -561,11 +607,11 @@ class ApkProtectionProcessor(
                 dos.write(metaCipher)
 
                 val keySpec = SecretKeySpec(aesKey, "AES")
+                val iv = ByteArray(12)
                 dexPayloads.forEach { dexBytes ->
-                    val iv = ByteArray(12).also { rng.nextBytes(it) }
-                    val cipherText = Cipher.getInstance("AES/GCM/NoPadding").apply {
-                        init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
-                    }.doFinal(dexBytes)
+                    rng.nextBytes(iv)
+                    cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
+                    val cipherText = cipher.doFinal(dexBytes)
                     dos.write(iv)
                     dos.writeInt(cipherText.size)
                     dos.write(cipherText)
@@ -573,6 +619,27 @@ class ApkProtectionProcessor(
                 dos.flush()
             }
             return out.toByteArray()
+        }
+
+        private fun buildPackerMarkerStub(packageName: String): ByteArray {
+            // Minimal valid 64-byte ELF64 ARM64 header + SHA-256 package fingerprint in assets/libjiagu.so
+            val out = ByteArray(128)
+            // ELF magic + 64-bit LE + v1
+            out[0] = 0x7F
+            out[1] = 'E'.code.toByte()
+            out[2] = 'L'.code.toByte()
+            out[3] = 'F'.code.toByte()
+            out[4] = 2 // ELFCLASS64
+            out[5] = 1 // ELFDATA2LSB
+            out[6] = 1 // EV_CURRENT
+            out[16] = 3 // ET_DYN
+            out[18] = 0xB7.toByte() // EM_AARCH64
+            out[20] = 1 // e_version
+            out[52] = 64 // e_ehsize
+            val hash = MessageDigest.getInstance("SHA-256")
+                .digest("$packageName:DSPRO_STUB_V3".toByteArray(Charsets.UTF_8))
+            System.arraycopy(hash, 0, out, 64, hash.size)
+            return out
         }
 
         private fun buildEncryptedGuardPolicy(
@@ -585,7 +652,6 @@ class ApkProtectionProcessor(
             var flags = 0
             if (config.detectRoot) flags = flags or 1
             if (config.detectEmulator) flags = flags or (1 shl 1)
-            if (config.detectVpn) flags = flags or (1 shl 2)
             if (config.detectXposed) flags = flags or (1 shl 3)
             if (config.detectDebugger) flags = flags or (1 shl 4)
             if (config.antiScreenshot) flags = flags or (1 shl 5)
@@ -680,6 +746,69 @@ class ApkProtectionProcessor(
             buf.putShort(ANDROID_ZIPALIGN_EXTRA_TAG)
             buf.putShort((pad - 4).toShort())
             return extra
+        }
+
+        private fun streamStoredZipEntry(
+            countingOut: CountingOutputStream,
+            zipOut: ZipOutputStream,
+            written: HashSet<String>,
+            name: String,
+            size: Long,
+            crc: Long,
+            zipIn: ZipFile,
+            entry: ZipEntry,
+            copyBuf: ByteArray,
+            computeSha256: Boolean,
+        ): String? {
+            if (!written.add(name)) return null
+            val outEntry = ZipEntry(name)
+            val alignment = if (name.endsWith(".so")) PAGE_ALIGN_BYTES else DATA_ALIGN_BYTES
+            val nameLen = name.toByteArray(Charsets.UTF_8).size
+            val unpaddedDataOffset = countingOut.bytesWritten + 30L + nameLen
+            val remainder = (unpaddedDataOffset % alignment).toInt()
+            val pad = if (remainder == 0) 0 else alignment - remainder
+            if (pad > 0) {
+                outEntry.extra = buildAlignmentPaddingExtra(pad)
+            }
+            outEntry.method = ZipEntry.STORED
+            outEntry.size = size
+            outEntry.compressedSize = size
+            outEntry.crc = crc
+            zipOut.putNextEntry(outEntry)
+            val md = if (computeSha256) MessageDigest.getInstance("SHA-256") else null
+            zipIn.getInputStream(entry).use { input ->
+                var read: Int
+                while (input.read(copyBuf).also { read = it } != -1) {
+                    zipOut.write(copyBuf, 0, read)
+                    md?.update(copyBuf, 0, read)
+                }
+            }
+            zipOut.closeEntry()
+            return md?.digest()?.joinToString("") { "%02x".format(it) }
+        }
+
+        private fun streamDeflatedZipEntry(
+            zipOut: ZipOutputStream,
+            written: HashSet<String>,
+            name: String,
+            zipIn: ZipFile,
+            entry: ZipEntry,
+            copyBuf: ByteArray,
+            computeSha256: Boolean,
+        ): String? {
+            if (!written.add(name)) return null
+            val outEntry = ZipEntry(name).apply { method = ZipEntry.DEFLATED }
+            zipOut.putNextEntry(outEntry)
+            val md = if (computeSha256) MessageDigest.getInstance("SHA-256") else null
+            zipIn.getInputStream(entry).use { input ->
+                var read: Int
+                while (input.read(copyBuf).also { read = it } != -1) {
+                    zipOut.write(copyBuf, 0, read)
+                    md?.update(copyBuf, 0, read)
+                }
+            }
+            zipOut.closeEntry()
+            return md?.digest()?.joinToString("") { "%02x".format(it) }
         }
 
         private fun writeZipBytes(

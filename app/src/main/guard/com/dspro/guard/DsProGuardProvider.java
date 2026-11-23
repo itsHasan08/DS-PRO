@@ -10,9 +10,6 @@ import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.content.pm.SigningInfo;
 import android.database.Cursor;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -27,13 +24,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.InputStream;
-import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
 import java.util.zip.ZipEntry;
@@ -54,7 +49,6 @@ public final class DsProGuardProvider extends ContentProvider {
 
     private static final int FLAG_DETECT_ROOT = 1;
     private static final int FLAG_DETECT_EMULATOR = 1 << 1;
-    private static final int FLAG_DETECT_VPN = 1 << 2;
     private static final int FLAG_DETECT_XPOSED = 1 << 3;
     private static final int FLAG_DETECT_DEBUGGER = 1 << 4;
     private static final int FLAG_ANTI_SCREENSHOT = 1 << 5;
@@ -96,13 +90,12 @@ public final class DsProGuardProvider extends ContentProvider {
         enforceChecks(context, policy);
 
         final boolean antiScreenshot = policy.has(FLAG_ANTI_SCREENSHOT);
-        final boolean detectVpn = policy.has(FLAG_DETECT_VPN);
         final boolean detectDebugger = policy.has(FLAG_DETECT_DEBUGGER);
         final boolean antiDump = policy.has(FLAG_ANTI_DUMP);
         final boolean detectXposed = policy.has(FLAG_DETECT_XPOSED);
         final boolean antiTampering = policy.has(FLAG_ANTI_TAMPERING);
 
-        if (antiScreenshot || detectVpn || detectDebugger || antiDump || detectXposed) {
+        if (antiScreenshot || detectDebugger || antiDump || detectXposed) {
             final Context appCtx = context.getApplicationContext();
             if (appCtx instanceof Application) {
                 ((Application) appCtx).registerActivityLifecycleCallbacks(
@@ -125,9 +118,6 @@ public final class DsProGuardProvider extends ContentProvider {
                             }
                             if (detectDebugger && isDebuggerAttached()) {
                                 crashWithReason("Debugger detected");
-                            }
-                            if (detectVpn && isVpnActive(activity)) {
-                                crashWithReason("VPN detected");
                             }
                             if (detectXposed && isHookingFrameworkPresent()) {
                                 crashWithReason("Xposed / Frida hooking detected");
@@ -157,7 +147,7 @@ public final class DsProGuardProvider extends ContentProvider {
             }
         }
 
-        if (antiDump || detectXposed || detectDebugger || antiTampering || detectVpn) {
+        if (antiDump || detectXposed || detectDebugger || antiTampering) {
             startLiveWatchdog(context.getApplicationContext(), policy);
         }
 
@@ -176,9 +166,6 @@ public final class DsProGuardProvider extends ContentProvider {
         }
         if (policy.has(FLAG_DETECT_EMULATOR) && isEmulator()) {
             crashWithReason("Emulator detected");
-        }
-        if (policy.has(FLAG_DETECT_VPN) && isVpnActive(context)) {
-            crashWithReason("VPN detected");
         }
         if (policy.has(FLAG_DETECT_XPOSED) && isHookingFrameworkPresent()) {
             crashWithReason("Xposed / Frida hooking detected");
@@ -222,10 +209,6 @@ public final class DsProGuardProvider extends ContentProvider {
                         }
                         if (policy.has(FLAG_DETECT_XPOSED) && isHookingFrameworkPresent()) {
                             triggerMainCrash(mainHandler, "Runtime hooking framework detected");
-                            return;
-                        }
-                        if (policy.has(FLAG_DETECT_VPN) && isVpnActive(appContext)) {
-                            triggerMainCrash(mainHandler, "VPN detected");
                             return;
                         }
                         if (policy.has(FLAG_ANTI_TAMPERING) && !verifyApkIntegrity(appContext, policy.integrityEntries)) {
@@ -493,41 +476,6 @@ public final class DsProGuardProvider extends ContentProvider {
         return new File("/dev/socket/qemud").exists()
             || new File("/dev/qemu_pipe").exists()
             || new File("/system/lib/libc_malloc_debug_qemu.so").exists();
-    }
-
-    private static boolean isVpnActive(Context context) {
-        try {
-            ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm != null) {
-                Network[] networks = cm.getAllNetworks();
-                if (networks != null) {
-                    for (Network net : networks) {
-                        NetworkCapabilities caps = cm.getNetworkCapabilities(net);
-                        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
-            if (ifaces != null) {
-                for (NetworkInterface nif : Collections.list(ifaces)) {
-                    if (!nif.isUp() || nif.isLoopback()) {
-                        continue;
-                    }
-                    String name = safeLower(nif.getName());
-                    if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("wg") || name.startsWith("pptp")) {
-                        return true;
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return false;
     }
 
     private static boolean isHookingFrameworkPresent() {

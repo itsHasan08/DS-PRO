@@ -27,7 +27,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
@@ -36,7 +35,6 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -45,6 +43,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -64,6 +64,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
@@ -72,6 +73,7 @@ import com.example.domain.model.ProtectionFeatureInfo
 import com.example.domain.model.ProtectionRunResult
 import com.example.domain.model.ProtectionStepResult
 import com.example.domain.model.StepStatus
+import com.example.ui.theme.BorderStrong
 import com.example.ui.theme.BorderSubtle
 import com.example.ui.theme.CharcoalText
 import com.example.ui.theme.ErrorRed
@@ -91,8 +93,6 @@ import com.example.ui.theme.TealTint
 @Composable
 fun DsProTopBar(
     activeCount: Int,
-    isResetEnabled: Boolean = true,
-    onReset: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -142,44 +142,41 @@ fun DsProTopBar(
                     )
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    StatusPill(
-                        text = "$activeCount Active",
-                        containerColor = if (activeCount > 0) SuccessTint else ProBlueTint,
-                        contentColor = if (activeCount > 0) SuccessEmerald else ProBlueDark,
-                    )
-                    Surface(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(
-                                enabled = isResetEnabled,
-                                role = Role.Button,
-                                onClick = onReset,
-                            )
-                            .testTag("reset_button"),
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (isResetEnabled) ProBlueTint else SectionGrey,
-                        border = BorderStroke(
-                            1.dp,
-                            if (isResetEnabled) ProBlue.copy(alpha = 0.35f) else BorderSubtle,
-                        ),
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Rounded.RestartAlt,
-                                contentDescription = "Reset all",
-                                tint = if (isResetEnabled) ProBlueDark else SlateMuted,
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
-                    }
-                }
+                StatusPill(
+                    text = "$activeCount Active",
+                    containerColor = if (activeCount > 0) SuccessTint else ProBlueTint,
+                    contentColor = if (activeCount > 0) SuccessEmerald else ProBlueDark,
+                )
             }
             HorizontalDivider(thickness = 1.dp, color = BorderSubtle)
+        }
+    }
+}
+
+@Composable
+fun CenteredToastHost(
+    hostState: SnackbarHostState,
+    modifier: Modifier = Modifier,
+) {
+    SnackbarHost(
+        hostState = hostState,
+        modifier = modifier
+            .padding(horizontal = 32.dp)
+            .testTag("centered_toast_host"),
+    ) { data ->
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = PureWhite.copy(alpha = 0.88f),
+            border = BorderStroke(1.dp, BorderStrong.copy(alpha = 0.55f)),
+            shadowElevation = 8.dp,
+        ) {
+            Text(
+                text = data.visuals.message,
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                color = Color.Black,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+            )
         }
     }
 }

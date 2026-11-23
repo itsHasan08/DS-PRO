@@ -16,7 +16,6 @@ data class ProtectionConfig(
     // Runtime Guard (all OFF by default — enforced via injected DsProGuardProvider DEX)
     val detectRoot: Boolean = false,
     val detectEmulator: Boolean = false,
-    val detectVpn: Boolean = false,
     val detectXposed: Boolean = false,
     val detectDebugger: Boolean = false,
     val antiScreenshot: Boolean = false,
@@ -35,7 +34,6 @@ data class ProtectionConfig(
     val requiresRuntimeGuard: Boolean
         get() = detectRoot ||
             detectEmulator ||
-            detectVpn ||
             detectXposed ||
             detectDebugger ||
             antiScreenshot ||
@@ -47,7 +45,6 @@ data class ProtectionConfig(
         get() = listOf(
             detectRoot,
             detectEmulator,
-            detectVpn,
             detectXposed,
             detectDebugger,
             antiScreenshot,
@@ -66,7 +63,6 @@ data class ProtectionConfig(
         ProtectionSection.RUNTIME_GUARD -> listOf(
             detectRoot,
             detectEmulator,
-            detectVpn,
             detectXposed,
             detectDebugger,
             antiScreenshot,

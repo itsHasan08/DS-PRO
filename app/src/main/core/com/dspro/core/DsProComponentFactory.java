@@ -99,10 +99,14 @@ public final class DsProComponentFactory extends AppComponentFactory {
         ClassLoader loader = activeLoader(cl);
         String targetClass = className;
         DsProCoreLoader.CoreMetadata meta = DsProCoreLoader.getCachedMetadata();
-        if (meta != null && DsProApplication.class.getName().equals(className)) {
+        if (meta != null && (com.stub.StubApp.class.getName().equals(className)
+            || DsProApplication.class.getName().equals(className))) {
             targetClass = meta.originalAppClass.isEmpty()
-                ? DsProApplication.class.getName()
+                ? com.stub.StubApp.class.getName()
                 : meta.originalAppClass;
+        }
+        if (com.stub.StubApp.class.getName().equals(targetClass)) {
+            return new com.stub.StubApp();
         }
         if (DsProApplication.class.getName().equals(targetClass)) {
             return new DsProApplication();

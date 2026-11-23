@@ -47,7 +47,8 @@ public class DsProApplication extends Application {
         DsProCoreLoader.verifyGuardBindingIfRequired(base, meta);
 
         if (meta != null && !meta.originalAppClass.isEmpty()
-            && !DsProApplication.class.getName().equals(meta.originalAppClass)) {
+            && !DsProApplication.class.getName().equals(meta.originalAppClass)
+            && !"com.stub.StubApp".equals(meta.originalAppClass)) {
             try {
                 ClassLoader cl = DsProCoreLoader.getActiveClassLoader();
                 if (cl == null) {

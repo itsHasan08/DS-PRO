@@ -11,6 +11,7 @@ import com.example.domain.model.ApkAnalysisResult
 import com.example.domain.model.ProtectionConfig
 import com.example.domain.model.ProtectionRunResult
 import com.example.domain.model.ProtectionStepResult
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -94,21 +95,8 @@ class MainViewModel(
         if (currentState.isProcessing || currentState.isLoadingApk || currentState.isRefreshing) return
 
         val uriStr = currentState.selectedApkUri
-        if (uriStr == null) {
-            _uiState.update {
-                it.copy(
-                    apkError = null,
-                    progress = 0,
-                    steps = emptyList(),
-                    runResult = null,
-                    statusMessage = "Refreshed.",
-                )
-            }
-            return
-        }
-
-        val parsedUri = runCatching { Uri.parse(uriStr) }.getOrNull() ?: return
         viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
             _uiState.update {
                 it.copy(
                     isRefreshing = true,
@@ -118,14 +106,44 @@ class MainViewModel(
                     runResult = null,
                 )
             }
-            analyzerEngine.loadApkFromUri(parsedUri)
+
+            if (uriStr == null) {
+                delay(480L)
+                _uiState.update {
+                    it.copy(
+                        isRefreshing = false,
+                        statusMessage = "Workspace refreshed",
+                    )
+                }
+                return@launch
+            }
+
+            val parsedUri = runCatching { Uri.parse(uriStr) }.getOrNull()
+            if (parsedUri == null) {
+                delay(420L)
+                _uiState.update {
+                    it.copy(
+                        isRefreshing = false,
+                        statusMessage = "Workspace refreshed",
+                    )
+                }
+                return@launch
+            }
+
+            val reloadResult = analyzerEngine.loadApkFromUri(parsedUri)
+            val elapsed = System.currentTimeMillis() - startedAt
+            if (elapsed < 480L) {
+                delay(480L - elapsed)
+            }
+
+            reloadResult
                 .onSuccess { result ->
                     _uiState.update {
                         it.copy(
                             isRefreshing = false,
                             selectedApk = result,
                             apkError = null,
-                            statusMessage = "Reloaded ${result.fileName}.",
+                            statusMessage = "Reloaded ${result.fileName}",
                         )
                     }
                 }
@@ -134,18 +152,11 @@ class MainViewModel(
                         it.copy(
                             isRefreshing = false,
                             apkError = err.message ?: "Failed to reload APK.",
-                            statusMessage = "Reload failed.",
+                            statusMessage = "Reload failed",
                         )
                     }
                 }
         }
-    }
-
-    fun resetAll() {
-        if (_uiState.value.isProcessing) return
-        _uiState.value = DsProUiState(
-            statusMessage = "Everything has been reset.",
-        )
     }
 
     fun startProtection() {

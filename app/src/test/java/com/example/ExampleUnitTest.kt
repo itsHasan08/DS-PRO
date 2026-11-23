@@ -263,7 +263,7 @@ class ExampleUnitTest {
             val appDex1 = buildSyntheticDex(withDebugInfo = true)
             val appDex2 = buildSyntheticDex(withDebugInfo = true, descriptor = "Lcom/demo/app/Feature;")
             val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
-            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/core/DsProApplication;")
+            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/stub/StubApp;")
             val arscBytes = ByteArray(64) { 0x42 }
             val soBytes = ByteArray(64) { 0x7F }
 
@@ -312,7 +312,6 @@ class ExampleUnitTest {
             val fullConfig = ProtectionConfig(
                 detectRoot = true,
                 detectEmulator = true,
-                detectVpn = true,
                 detectXposed = true,
                 detectDebugger = true,
                 antiScreenshot = true,
@@ -347,8 +346,8 @@ class ExampleUnitTest {
             assertEquals("classes2.dex", stats.injectedGuardDexName)
             assertEquals(4, stats.dexDebugItemsCleared)
             assertEquals(1, stats.strippedBloatCount)
-            // manifest + arsc + lib + single dspro core container + core classes.dex + guard classes2.dex = 6
-            assertEquals(6, stats.integrityCount)
+            // manifest + arsc + lib + dspro core container + libjiagu.so + core classes.dex + guard classes2.dex = 7
+            assertEquals(7, stats.integrityCount)
 
             val (valid, _) = ApkProtectionProcessor.verifyOutputApk(outputApk)
             assertTrue(valid)
@@ -376,13 +375,20 @@ class ExampleUnitTest {
                 assertFalse(rawText.contains("AndroidManifest.xml"))
 
                 val guardLines = decryptGuardPolicy(outZip, "com.demo.app")
-                assertEquals("511", guardLines[0]) // all 9 runtime flags enabled (including antiDump)
+                assertEquals("507", guardLines[0]) // all 8 runtime flags enabled (including antiDump)
                 assertEquals("AB:CD:EF", guardLines[1])
-                assertEquals("6", guardLines[2])
+                assertEquals("7", guardLines[2])
+
+                val jiaguBytes = outZip.getInputStream(outZip.getEntry("assets/libjiagu.so")).readBytes()
+                assertTrue(jiaguBytes.size >= 64)
+                assertEquals(0x7F.toByte(), jiaguBytes[0])
+                assertEquals('E'.code.toByte(), jiaguBytes[1])
+                assertEquals('L'.code.toByte(), jiaguBytes[2])
+                assertEquals('F'.code.toByte(), jiaguBytes[3])
 
                 val patchedManifest = outZip.getInputStream(outZip.getEntry("AndroidManifest.xml")).readBytes()
                 val (appName, factoryName) = AxmlManifestPatcher.inspectCoreForTest(patchedManifest)
-                assertEquals(AxmlManifestPatcher.CORE_APP_CLASS, appName)
+                assertEquals("com.stub.StubApp", appName)
                 assertEquals(AxmlManifestPatcher.CORE_FACTORY_CLASS, factoryName)
             }
         } finally {
@@ -416,6 +422,7 @@ class ExampleUnitTest {
         assertTrue(DexPatcher.containsAsciiMarker(guardBytes, "Lcom/dspro/guard/DsProGuardProvider;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProComponentFactory;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProApplication;"))
+        assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/stub/StubApp;"))
         assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "com/dspro/dpt"))
         assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "com/dspro/dpt"))
 
@@ -441,7 +448,6 @@ class ExampleUnitTest {
             val config = ProtectionConfig(
                 detectRoot = true,
                 detectEmulator = true,
-                detectVpn = true,
                 detectXposed = true,
                 detectDebugger = true,
                 antiScreenshot = true,
@@ -512,7 +518,7 @@ class ExampleUnitTest {
             val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.real.target", debuggable = true, allowBackup = true)
             val appDex = buildSyntheticDex(withDebugInfo = true)
             val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
-            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/core/DsProApplication;")
+            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/stub/StubApp;")
             val arscBytes = ByteArray(123) { 0x42 }
             val tfliteBytes = ByteArray(77) { 0x33 }
             val soBytes = ByteArray(256) { 0x7F }
@@ -618,7 +624,7 @@ class ExampleUnitTest {
                 assertEquals(1, decrypted.size)
                 assertTrue(DexPatcher.isValidDex(decrypted[0]))
 
-                // Only clean branded encrypted dspro_*.bin assets added (zero "dpt")
+                // Clean branded encrypted dspro_*.bin assets + 360-recognized assets/libjiagu.so (zero "dpt")
                 val assetNames = zip.entries().asSequence().map { it.name }.filter { it.startsWith("assets/") }.toList()
                 assertEquals(
                     listOf(
@@ -626,6 +632,7 @@ class ExampleUnitTest {
                         "assets/model.tflite",
                         "assets/dspro_core.bin",
                         "assets/dspro_guard.bin",
+                        "assets/libjiagu.so",
                     ).sorted(),
                     assetNames.sorted(),
                 )
@@ -716,7 +723,7 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `reset ui state clears apk config progress and disables start`() {
+    fun `refresh state disables start temporarily and preserves selected apk and toggles`() {
         val activeState = DsProUiState(
             selectedApkUri = "content://downloads/demo.apk",
             selectedApk = sampleApk(),
@@ -731,16 +738,21 @@ class ExampleUnitTest {
         assertTrue(activeState.isStartEnabled)
         assertEquals(4, activeState.config.activeToggleCount)
 
-        val refreshingState = activeState.copy(isRefreshing = true)
+        val refreshingState = activeState.copy(
+            isRefreshing = true,
+            progress = 0,
+            steps = emptyList(),
+            runResult = null,
+        )
         assertFalse(refreshingState.isStartEnabled)
+        assertEquals("content://downloads/demo.apk", refreshingState.selectedApkUri)
+        assertEquals(4, refreshingState.config.activeToggleCount)
 
-        val resetState = DsProUiState(statusMessage = "Everything has been reset.")
-        assertEquals(null, resetState.selectedApkUri)
-        assertEquals(null, resetState.selectedApk)
-        assertEquals(0, resetState.config.activeToggleCount)
-        assertEquals(0, resetState.progress)
-        assertTrue(resetState.steps.isEmpty())
-        assertEquals(null, resetState.runResult)
-        assertFalse(resetState.isStartEnabled)
+        val completedRefresh = refreshingState.copy(
+            isRefreshing = false,
+            statusMessage = "Reloaded demo.apk",
+        )
+        assertTrue(completedRefresh.isStartEnabled)
+        assertEquals("Reloaded demo.apk", completedRefresh.statusMessage)
     }
 }
