@@ -119,11 +119,8 @@ public final class DsProGuardProvider extends ContentProvider {
                             if (detectDebugger && isDebuggerAttached()) {
                                 crashWithReason("Debugger detected");
                             }
-                            if (detectXposed && isHookingFrameworkPresent()) {
+                            if (detectXposed && isHookingClassPresent()) {
                                 crashWithReason("Xposed / Frida hooking detected");
-                            }
-                            if (antiDump && isMemoryDumpDetected()) {
-                                crashWithReason("Memory / APK dumper detected");
                             }
                         }
 
@@ -170,7 +167,7 @@ public final class DsProGuardProvider extends ContentProvider {
         if (policy.has(FLAG_DETECT_XPOSED) && isHookingFrameworkPresent()) {
             crashWithReason("Xposed / Frida hooking detected");
         }
-        if (policy.has(FLAG_ANTI_TAMPERING) && !verifyApkIntegrity(context, policy.integrityEntries)) {
+        if (policy.has(FLAG_ANTI_TAMPERING) && !verifyCriticalApkIntegrity(context, policy.integrityEntries)) {
             crashWithReason("APK tampering detected");
         }
         if (policy.has(FLAG_SIGNATURE_PINNING)) {
@@ -192,11 +189,14 @@ public final class DsProGuardProvider extends ContentProvider {
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
+                int cycle = 0;
                 while (true) {
-                    try {
-                        Thread.sleep(1800L);
-                    } catch (InterruptedException ignored) {
-                        return;
+                    if (cycle > 0) {
+                        try {
+                            Thread.sleep(2500L);
+                        } catch (InterruptedException ignored) {
+                            return;
+                        }
                     }
                     try {
                         if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
@@ -211,15 +211,18 @@ public final class DsProGuardProvider extends ContentProvider {
                             triggerMainCrash(mainHandler, "Runtime hooking framework detected");
                             return;
                         }
-                        if (policy.has(FLAG_ANTI_TAMPERING) && !verifyApkIntegrity(appContext, policy.integrityEntries)) {
-                            triggerMainCrash(mainHandler, "APK tampering detected");
-                            return;
+                        if (policy.has(FLAG_ANTI_TAMPERING) && (cycle % 8 == 0)) {
+                            if (!verifyApkIntegrity(appContext, policy.integrityEntries)) {
+                                triggerMainCrash(mainHandler, "APK tampering detected");
+                                return;
+                            }
                         }
                     } catch (SecurityException se) {
                         triggerMainCrash(mainHandler, se.getMessage() != null ? se.getMessage() : "Security violation");
                         return;
                     } catch (Throwable ignored) {
                     }
+                    cycle++;
                 }
             }
         }, "dspro-guard-mon");
@@ -361,9 +364,9 @@ public final class DsProGuardProvider extends ContentProvider {
         )) {
             return true;
         }
-        // Check Frida default ports 27042 (0x69A2) and 27043 (0x69A3) in /proc/net/tcp*
-        if (containsInFile("/proc/net/tcp", ":69a2", ":69a3")
-            || containsInFile("/proc/net/tcp6", ":69a2", ":69a3")
+        // Check Frida listening ports 27042 (0x69A2) and 27043 (0x69A3) in /proc/net/tcp*
+        if (containsFridaListeningPort("/proc/net/tcp")
+            || containsFridaListeningPort("/proc/net/tcp6")
             || containsInFile("/proc/net/unix", "frida", "linjector", "blackdex")) {
             return true;
         }
@@ -372,7 +375,9 @@ public final class DsProGuardProvider extends ContentProvider {
             if (cls.contains("blackdex")
                 || cls.contains("dumpdex")
                 || cls.contains("fupk")
-                || cls.contains("fart")
+                || cls.contains("libfart")
+                || cls.contains("fart_art")
+                || cls.contains("cn.mik.fart")
                 || cls.contains("youpk")
                 || cls.contains("dexdump")
                 || cls.contains("frida")) {
@@ -478,11 +483,18 @@ public final class DsProGuardProvider extends ContentProvider {
             || new File("/system/lib/libc_malloc_debug_qemu.so").exists();
     }
 
-    private static boolean isHookingFrameworkPresent() {
+    private static boolean isHookingClassPresent() {
         try {
             Class.forName("de.robv.android.xposed.XposedBridge");
             return true;
         } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean isHookingFrameworkPresent() {
+        if (isHookingClassPresent()) {
+            return true;
         }
 
         for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
@@ -514,6 +526,40 @@ public final class DsProGuardProvider extends ContentProvider {
         } catch (Throwable ignored) {
         }
         return false;
+    }
+
+    private static boolean verifyCriticalApkIntegrity(Context context, List<String> entries) {
+        if (entries == null || entries.isEmpty()) {
+            return false;
+        }
+        try (ZipFile apkZip = new ZipFile(context.getPackageCodePath())) {
+            int verified = 0;
+            for (String row : entries) {
+                int sep = row.indexOf('|');
+                if (sep <= 0) {
+                    return false;
+                }
+                String expectedHex = row.substring(0, sep).trim().toLowerCase(Locale.US);
+                String entryName = row.substring(sep + 1).trim();
+                ZipEntry entry = apkZip.getEntry(entryName);
+                if (entry == null) {
+                    return false;
+                }
+                boolean isCriticalFast = "AndroidManifest.xml".equals(entryName)
+                    || entryName.endsWith(".dex")
+                    || entryName.startsWith("assets/dspro_");
+                if (isCriticalFast) {
+                    String actualHex = sha256Entry(apkZip, entry);
+                    if (!expectedHex.equals(actualHex)) {
+                        return false;
+                    }
+                }
+                verified++;
+            }
+            return verified > 0;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private static boolean verifyApkIntegrity(Context context, List<String> entries) {
@@ -591,6 +637,20 @@ public final class DsProGuardProvider extends ContentProvider {
             }
         }
         return toLowerHex(md.digest());
+    }
+
+    private static boolean containsFridaListeningPort(String tcpPath) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(tcpPath))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String lower = line.toLowerCase(Locale.US);
+                if ((lower.contains(":69a2 ") || lower.contains(":69a3 ")) && lower.contains(" 0a ")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private static boolean containsInFile(String filePath, String... needles) {

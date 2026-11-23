@@ -6,6 +6,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.os.Build;
 import android.os.Debug;
+import android.os.Process;
 import dalvik.system.InMemoryDexClassLoader;
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
@@ -99,6 +100,9 @@ final class DsProCoreLoader {
     }
 
     static void assertGuardActiveIfRequired() {
+        if (Process.isIsolated()) {
+            return;
+        }
         CoreMetadata meta = cachedMetadata;
         if (meta != null && meta.requireGuard && !guardProviderInstantiated) {
             throw new SecurityException("DS PRO Protection: Guard integrity compromised");

@@ -2,6 +2,7 @@ package com.dspro.core;
 
 import android.app.Application;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.os.Build;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -43,16 +44,18 @@ public class DsProApplication extends Application {
             DsProCoreLoader.markInitialized(base.getPackageName(), bundle.metadata, base.getClassLoader(), factory);
         }
 
+        ClassLoader active = DsProCoreLoader.getActiveClassLoader();
+        if (active != null) {
+            Thread.currentThread().setContextClassLoader(active);
+        }
+
         DsProCoreLoader.CoreMetadata meta = DsProCoreLoader.getCachedMetadata();
         DsProCoreLoader.verifyGuardBindingIfRequired(base, meta);
 
         if (meta != null && !meta.originalAppClass.isEmpty()
             && !DsProApplication.class.getName().equals(meta.originalAppClass)) {
             try {
-                ClassLoader cl = DsProCoreLoader.getActiveClassLoader();
-                if (cl == null) {
-                    cl = base.getClassLoader();
-                }
+                ClassLoader cl = active != null ? active : base.getClassLoader();
                 realApplication = (Application) cl.loadClass(meta.originalAppClass)
                     .getDeclaredConstructor()
                     .newInstance();
@@ -67,12 +70,55 @@ public class DsProApplication extends Application {
     }
 
     @Override
+    public Context getApplicationContext() {
+        return realApplication != null ? realApplication : super.getApplicationContext();
+    }
+
+    @Override
+    public ClassLoader getClassLoader() {
+        ClassLoader active = DsProCoreLoader.getActiveClassLoader();
+        return active != null ? active : super.getClassLoader();
+    }
+
+    @Override
     public void onCreate() {
         super.onCreate();
         DsProCoreLoader.verifyGuardBindingIfRequired(this, DsProCoreLoader.getCachedMetadata());
         if (realApplication != null) {
             bindRealApplicationToSystem(realApplication);
             realApplication.onCreate();
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (realApplication != null) {
+            realApplication.onConfigurationChanged(newConfig);
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        if (realApplication != null) {
+            realApplication.onLowMemory();
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (realApplication != null) {
+            realApplication.onTrimMemory(level);
+        }
+    }
+
+    @Override
+    public void onTerminate() {
+        super.onTerminate();
+        if (realApplication != null) {
+            realApplication.onTerminate();
         }
     }
 

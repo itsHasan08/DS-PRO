@@ -9,6 +9,7 @@ import android.content.ContentProvider;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
+import android.os.Process;
 import dalvik.system.InMemoryDexClassLoader;
 import java.io.File;
 
@@ -58,11 +59,13 @@ public final class DsProComponentFactory extends AppComponentFactory {
                 }
             }
             DsProCoreLoader.markInitialized(aInfo.packageName, bundle.metadata, finalLoader, origFactory);
+            Thread.currentThread().setContextClassLoader(finalLoader);
             return finalLoader;
         }
         if (DsProCoreLoader.isInitializedFor(aInfo.packageName)) {
             ClassLoader cached = DsProCoreLoader.getActiveClassLoader();
             if (cached != null) {
+                Thread.currentThread().setContextClassLoader(cached);
                 return cached;
             }
         }
@@ -74,8 +77,11 @@ public final class DsProComponentFactory extends AppComponentFactory {
         if (aInfo.nativeLibraryDir != null && !aInfo.nativeLibraryDir.isEmpty()) {
             sb.append(aInfo.nativeLibraryDir);
         }
+        final String[] abis = Process.is64Bit()
+            ? Build.SUPPORTED_64_BIT_ABIS
+            : Build.SUPPORTED_32_BIT_ABIS;
         if (aInfo.sourceDir != null && !aInfo.sourceDir.isEmpty()) {
-            for (String abi : Build.SUPPORTED_ABIS) {
+            for (String abi : abis) {
                 if (sb.length() > 0) sb.append(File.pathSeparatorChar);
                 sb.append(aInfo.sourceDir).append("!/lib/").append(abi);
             }
@@ -83,7 +89,7 @@ public final class DsProComponentFactory extends AppComponentFactory {
         if (aInfo.splitSourceDirs != null) {
             for (String splitDir : aInfo.splitSourceDirs) {
                 if (splitDir != null && !splitDir.isEmpty()) {
-                    for (String abi : Build.SUPPORTED_ABIS) {
+                    for (String abi : abis) {
                         if (sb.length() > 0) sb.append(File.pathSeparatorChar);
                         sb.append(splitDir).append("!/lib/").append(abi);
                     }

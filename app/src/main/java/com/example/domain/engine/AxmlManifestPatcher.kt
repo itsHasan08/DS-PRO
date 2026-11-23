@@ -58,6 +58,7 @@ object AxmlManifestPatcher {
     private const val ATTR_NAME = 0x01010003
     private const val ATTR_DEBUGGABLE = 0x0101000f
     private const val ATTR_EXPORTED = 0x01010010
+    private const val ATTR_MULTIPROCESS = 0x01010013
     private const val ATTR_AUTHORITIES = 0x01010018
     private const val ATTR_ALLOW_BACKUP = 0x01010280
     private const val ATTR_INIT_ORDER = 0x010103a8
@@ -325,6 +326,7 @@ object AxmlManifestPatcher {
                 val pkg = manifestPkg.ifBlank { "app" }
                 val nameAttrIdx = doc.ensureResourceAttrString("name", ATTR_NAME)
                 val exportedAttrIdx = doc.ensureResourceAttrString("exported", ATTR_EXPORTED)
+                val multiprocessAttrIdx = doc.ensureResourceAttrString("multiprocess", ATTR_MULTIPROCESS)
                 val authoritiesAttrIdx = doc.ensureResourceAttrString("authorities", ATTR_AUTHORITIES)
                 val initOrderAttrIdx = doc.ensureResourceAttrString("initOrder", ATTR_INIT_ORDER)
 
@@ -361,6 +363,15 @@ object AxmlManifestPatcher {
                             res0 = 0,
                             dataType = TYPE_INT_BOOLEAN,
                             data = 0,
+                        ),
+                        AxmlAttribute(
+                            nsIdx = androidNsIdx,
+                            nameIdx = multiprocessAttrIdx,
+                            rawValueIdx = -1,
+                            valueSize = 8,
+                            res0 = 0,
+                            dataType = TYPE_INT_BOOLEAN,
+                            data = -1,
                         ),
                         AxmlAttribute(
                             nsIdx = androidNsIdx,
