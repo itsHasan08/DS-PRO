@@ -156,7 +156,7 @@ class ApkAnalyzerEngine(private val context: Context) {
             isDebuggable = manifestSummary?.isDebuggable ?: false,
             allowsBackup = manifestSummary?.allowsBackup ?: true,
             hasGuardProvider = manifestSummary?.hasGuardProvider ?: false,
-            hasDptShell = manifestSummary?.hasDptShell ?: false,
+            hasCoreProtection = manifestSummary?.hasCoreProtection ?: false,
         )
     }
 

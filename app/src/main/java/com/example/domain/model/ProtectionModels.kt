@@ -2,7 +2,7 @@ package com.example.domain.model
 
 enum class ProtectionSection(val label: String) {
     RUNTIME_GUARD("Runtime Guard"),
-    BINARY_HARDENING("DPT & APK Hardening"),
+    BINARY_HARDENING("DS PRO & APK Hardening"),
 }
 
 data class ProtectionFeatureInfo(
@@ -22,9 +22,10 @@ data class ProtectionConfig(
     val antiScreenshot: Boolean = false,
     val antiTampering: Boolean = false,
     val signaturePinning: Boolean = false,
+    val antiDump: Boolean = false,
 
-    // DPT & Binary Hardening (DEX encryption shell + direct AXML/DEX/ZIP modifications)
-    val dptDexEncryption: Boolean = false,
+    // DS PRO Core & Binary Hardening (DEX encryption + direct AXML/DEX/ZIP modifications)
+    val dsProDexEncryption: Boolean = false,
     val disableDebuggable: Boolean = false,
     val disableBackup: Boolean = false,
     val stripDexDebug: Boolean = false,
@@ -39,7 +40,8 @@ data class ProtectionConfig(
             detectDebugger ||
             antiScreenshot ||
             antiTampering ||
-            signaturePinning
+            signaturePinning ||
+            antiDump
 
     val activeToggleCount: Int
         get() = listOf(
@@ -51,7 +53,8 @@ data class ProtectionConfig(
             antiScreenshot,
             antiTampering,
             signaturePinning,
-            dptDexEncryption,
+            antiDump,
+            dsProDexEncryption,
             disableDebuggable,
             disableBackup,
             stripDexDebug,
@@ -69,10 +72,11 @@ data class ProtectionConfig(
             antiScreenshot,
             antiTampering,
             signaturePinning,
+            antiDump,
         ).count { it }
 
         ProtectionSection.BINARY_HARDENING -> listOf(
-            dptDexEncryption,
+            dsProDexEncryption,
             disableDebuggable,
             disableBackup,
             stripDexDebug,
@@ -100,7 +104,7 @@ data class ApkAnalysisResult(
     val isDebuggable: Boolean = false,
     val allowsBackup: Boolean = true,
     val hasGuardProvider: Boolean = false,
-    val hasDptShell: Boolean = false,
+    val hasCoreProtection: Boolean = false,
 )
 
 enum class StepStatus {

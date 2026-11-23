@@ -17,6 +17,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Debug;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.WindowManager;
 
@@ -29,6 +31,7 @@ import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
@@ -42,7 +45,8 @@ import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Runtime protection guard compiled into ds_pro_guard.dex and injected into protected APKs.
- * Reads encrypted binary security configuration from assets/ and enforces checks in ContentProvider.onCreate().
+ * Reads encrypted binary security configuration from assets/dspro_guard.bin, wipes keys immediately,
+ * enforces checks at startup/Activity resume, and runs a live anti-dump watchdog thread.
  */
 public final class DsProGuardProvider extends ContentProvider {
 
@@ -56,6 +60,10 @@ public final class DsProGuardProvider extends ContentProvider {
     private static final int FLAG_ANTI_SCREENSHOT = 1 << 5;
     private static final int FLAG_ANTI_TAMPERING = 1 << 6;
     private static final int FLAG_SIGNATURE_PINNING = 1 << 7;
+    private static final int FLAG_ANTI_DUMP = 1 << 8;
+
+    private static final String POLICY_ASSET = "dspro_guard.bin";
+    private static volatile boolean watchdogStarted = false;
 
     private static final class GuardPolicy {
         final int flags;
@@ -90,8 +98,11 @@ public final class DsProGuardProvider extends ContentProvider {
         final boolean antiScreenshot = policy.has(FLAG_ANTI_SCREENSHOT);
         final boolean detectVpn = policy.has(FLAG_DETECT_VPN);
         final boolean detectDebugger = policy.has(FLAG_DETECT_DEBUGGER);
+        final boolean antiDump = policy.has(FLAG_ANTI_DUMP);
+        final boolean detectXposed = policy.has(FLAG_DETECT_XPOSED);
+        final boolean antiTampering = policy.has(FLAG_ANTI_TAMPERING);
 
-        if (antiScreenshot || detectVpn || detectDebugger) {
+        if (antiScreenshot || detectVpn || detectDebugger || antiDump || detectXposed) {
             final Context appCtx = context.getApplicationContext();
             if (appCtx instanceof Application) {
                 ((Application) appCtx).registerActivityLifecycleCallbacks(
@@ -118,6 +129,12 @@ public final class DsProGuardProvider extends ContentProvider {
                             if (detectVpn && isVpnActive(activity)) {
                                 crashWithReason("VPN detected");
                             }
+                            if (detectXposed && isHookingFrameworkPresent()) {
+                                crashWithReason("Xposed / Frida hooking detected");
+                            }
+                            if (antiDump && isMemoryDumpDetected()) {
+                                crashWithReason("Memory / APK dumper detected");
+                            }
                         }
 
                         @Override
@@ -140,12 +157,19 @@ public final class DsProGuardProvider extends ContentProvider {
             }
         }
 
+        if (antiDump || detectXposed || detectDebugger || antiTampering || detectVpn) {
+            startLiveWatchdog(context.getApplicationContext(), policy);
+        }
+
         return true;
     }
 
     private static void enforceChecks(Context context, GuardPolicy policy) {
         if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
             crashWithReason("Debugger detected");
+        }
+        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected()) {
+            crashWithReason("Memory / APK dumper detected");
         }
         if (policy.has(FLAG_DETECT_ROOT) && isDeviceRooted()) {
             crashWithReason("Root detected");
@@ -172,12 +196,72 @@ public final class DsProGuardProvider extends ContentProvider {
         }
     }
 
-    private static final String POLICY_ASSET = "dspro_guard.bin";
+    private static synchronized void startLiveWatchdog(final Context appContext, final GuardPolicy policy) {
+        if (watchdogStarted || appContext == null) {
+            return;
+        }
+        watchdogStarted = true;
+        final Handler mainHandler = new Handler(Looper.getMainLooper());
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (true) {
+                    try {
+                        Thread.sleep(1800L);
+                    } catch (InterruptedException ignored) {
+                        return;
+                    }
+                    try {
+                        if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
+                            triggerMainCrash(mainHandler, "Debugger attached at runtime");
+                            return;
+                        }
+                        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected()) {
+                            triggerMainCrash(mainHandler, "Runtime memory / DEX dump blocked");
+                            return;
+                        }
+                        if (policy.has(FLAG_DETECT_XPOSED) && isHookingFrameworkPresent()) {
+                            triggerMainCrash(mainHandler, "Runtime hooking framework detected");
+                            return;
+                        }
+                        if (policy.has(FLAG_DETECT_VPN) && isVpnActive(appContext)) {
+                            triggerMainCrash(mainHandler, "VPN detected");
+                            return;
+                        }
+                        if (policy.has(FLAG_ANTI_TAMPERING) && !verifyApkIntegrity(appContext, policy.integrityEntries)) {
+                            triggerMainCrash(mainHandler, "APK tampering detected");
+                            return;
+                        }
+                    } catch (SecurityException se) {
+                        triggerMainCrash(mainHandler, se.getMessage() != null ? se.getMessage() : "Security violation");
+                        return;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }, "dspro-guard-mon");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static void triggerMainCrash(Handler mainHandler, final String reason) {
+        final String fullMsg = reason.startsWith("DS PRO Protection:") ? reason : "DS PRO Protection: " + reason;
+        Log.e(TAG, fullMsg);
+        mainHandler.postAtFrontOfQueue(new Runnable() {
+            @Override
+            public void run() {
+                throw new SecurityException(fullMsg);
+            }
+        });
+    }
 
     private static GuardPolicy readEncryptedPolicy(Context context) {
         final String pkg = context.getPackageName();
 
-        byte[] blob;
+        byte[] blob = null;
+        byte[] salt = null;
+        byte[] keyBytes = null;
+        byte[] plain = null;
         try (InputStream in = context.getAssets().open(POLICY_ASSET)) {
             ByteArrayOutputStream out = new ByteArrayOutputStream(1024);
             byte[] buf = new byte[4096];
@@ -196,12 +280,12 @@ public final class DsProGuardProvider extends ContentProvider {
         }
 
         try {
-            byte[] salt = new byte[16];
+            salt = new byte[16];
             byte[] iv = new byte[12];
             System.arraycopy(blob, 0, salt, 0, 16);
             System.arraycopy(blob, 16, iv, 0, 12);
             String saltHex = toLowerHex(salt);
-            byte[] keyBytes = MessageDigest.getInstance("SHA-256").digest(
+            keyBytes = MessageDigest.getInstance("SHA-256").digest(
                 (pkg + ":DSPRO_GCFG_KEY:" + saltHex).getBytes(StandardCharsets.UTF_8)
             );
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
@@ -210,7 +294,7 @@ public final class DsProGuardProvider extends ContentProvider {
                 new SecretKeySpec(keyBytes, "AES"),
                 new GCMParameterSpec(128, iv)
             );
-            byte[] plain = cipher.doFinal(blob, 28, blob.length - 28);
+            plain = cipher.doFinal(blob, 28, blob.length - 28);
             String text = new String(plain, StandardCharsets.UTF_8);
             String[] lines = text.split("\n");
             if (lines.length < 3) {
@@ -227,12 +311,23 @@ public final class DsProGuardProvider extends ContentProvider {
                     integrityEntries.add(row);
                 }
             }
-            return new GuardPolicy(flags, pinnedCert, integrityEntries);
+            return new GuardPolicy(flags, pinnedCert, Collections.unmodifiableList(integrityEntries));
         } catch (SecurityException se) {
             throw se;
         } catch (Throwable t) {
             crashWithReason("Security policy tampered");
             return null;
+        } finally {
+            wipe(blob);
+            wipe(salt);
+            wipe(keyBytes);
+            wipe(plain);
+        }
+    }
+
+    private static void wipe(byte[] bytes) {
+        if (bytes != null) {
+            Arrays.fill(bytes, (byte) 0);
         }
     }
 
@@ -242,6 +337,94 @@ public final class DsProGuardProvider extends ContentProvider {
             sb.append(String.format(Locale.US, "%02x", b & 0xFF));
         }
         return sb.toString();
+    }
+
+    private static boolean isMemoryDumpDetected() {
+        if (isDebuggerAttached()) {
+            return true;
+        }
+        if (containsInFile(
+            "/proc/self/maps",
+            "blackdex",
+            "dumpdex",
+            "fupk3",
+            "libfart",
+            "fart_art",
+            "youpk",
+            "dexdump",
+            "drizzledumper",
+            "frida-agent",
+            "frida-gadget",
+            "linjector",
+            "sandhook",
+            "libpine",
+            "libepic",
+            "libwhale",
+            "libdobby",
+            "libsubstrate",
+            "lspd",
+            "lsposed",
+            "edxposed",
+            "libriru"
+        )) {
+            return true;
+        }
+        if (hasSuspiciousThreadNames(
+            "gum-js-loop",
+            "pool-frida",
+            "linjector",
+            "blackdex",
+            "fupk3"
+        )) {
+            return true;
+        }
+        // Check Frida default ports 27042 (0x69A2) and 27043 (0x69A3) in /proc/net/tcp*
+        if (containsInFile("/proc/net/tcp", ":69a2", ":69a3")
+            || containsInFile("/proc/net/tcp6", ":69a2", ":69a3")
+            || containsInFile("/proc/net/unix", "frida", "linjector", "blackdex")) {
+            return true;
+        }
+        for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
+            String cls = safeLower(el.getClassName());
+            if (cls.contains("blackdex")
+                || cls.contains("dumpdex")
+                || cls.contains("fupk")
+                || cls.contains("fart")
+                || cls.contains("youpk")
+                || cls.contains("dexdump")
+                || cls.contains("frida")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasSuspiciousThreadNames(String... needles) {
+        try {
+            File taskDir = new File("/proc/self/task");
+            File[] tasks = taskDir.listFiles();
+            if (tasks == null) {
+                return false;
+            }
+            for (File task : tasks) {
+                File commFile = new File(task, "comm");
+                if (!commFile.isFile()) continue;
+                try (BufferedReader br = new BufferedReader(new FileReader(commFile))) {
+                    String line = br.readLine();
+                    if (line != null) {
+                        String lower = line.trim().toLowerCase(Locale.US);
+                        for (String needle : needles) {
+                            if (lower.contains(needle)) {
+                                return true;
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private static boolean isDeviceRooted() {
@@ -361,7 +544,8 @@ public final class DsProGuardProvider extends ContentProvider {
             }
         }
 
-        return containsInFile("/proc/self/maps", "xposed", "lsposed", "edxposed", "frida-agent", "frida-gadget", "libsubstrate");
+        return containsInFile("/proc/self/maps", "xposed", "lsposed", "edxposed", "frida-agent", "frida-gadget", "linjector", "libsubstrate")
+            || hasSuspiciousThreadNames("gum-js-loop", "pool-frida", "linjector");
     }
 
     private static boolean isDebuggerAttached() {

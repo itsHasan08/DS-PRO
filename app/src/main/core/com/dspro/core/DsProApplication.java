@@ -1,4 +1,4 @@
-package com.dspro.dpt;
+package com.dspro.core;
 
 import android.app.Application;
 import android.content.Context;
@@ -8,10 +8,11 @@ import java.lang.reflect.Method;
 import java.util.List;
 
 /**
- * DPT Shell Application fallback for API 26-28 (before AppComponentFactory.instantiateClassLoader).
- * On API 29+, DsProAppComponentFactory swaps the ClassLoader and instantiates the real Application natively.
+ * DS PRO Core Application wrapper.
+ * Handles API 26-28 host classloader attachment, verifies anti-removal guard binding,
+ * and delegates seamlessly to the target Application class.
  */
-public class DsProShellApplication extends Application {
+public class DsProApplication extends Application {
 
     private Application realApplication;
     private Context attachedBase;
@@ -21,16 +22,16 @@ public class DsProShellApplication extends Application {
         super.attachBaseContext(base);
         this.attachedBase = base;
 
-        if (!DsProDptDecryptor.isInitialized()) {
-            DsProDptDecryptor.DecryptedBundle bundle = DsProDptDecryptor.decryptAll(
+        if (!DsProCoreLoader.isInitialized()) {
+            DsProCoreLoader.DecryptedBundle bundle = DsProCoreLoader.decryptAll(
                 base.getPackageCodePath(),
                 base.getPackageName()
             );
-            DsProDptDecryptor.injectIntoHostClassLoader(base.getClassLoader(), bundle.dexBuffers);
+            DsProCoreLoader.injectIntoHostClassLoader(base.getClassLoader(), bundle.dexBuffers);
 
             Object factory = null;
             if (Build.VERSION.SDK_INT >= 28 && !bundle.metadata.originalFactoryClass.isEmpty()
-                && !"com.dspro.dpt.DsProAppComponentFactory".equals(bundle.metadata.originalFactoryClass)) {
+                && !DsProComponentFactory.class.getName().equals(bundle.metadata.originalFactoryClass)) {
                 try {
                     factory = base.getClassLoader()
                         .loadClass(bundle.metadata.originalFactoryClass)
@@ -39,14 +40,16 @@ public class DsProShellApplication extends Application {
                 } catch (Throwable ignored) {
                 }
             }
-            DsProDptDecryptor.markInitialized(base.getPackageName(), bundle.metadata, base.getClassLoader(), factory);
+            DsProCoreLoader.markInitialized(base.getPackageName(), bundle.metadata, base.getClassLoader(), factory);
         }
 
-        DsProDptDecryptor.DptMetadata meta = DsProDptDecryptor.getCachedMetadata();
+        DsProCoreLoader.CoreMetadata meta = DsProCoreLoader.getCachedMetadata();
+        DsProCoreLoader.verifyGuardBindingIfRequired(base, meta);
+
         if (meta != null && !meta.originalAppClass.isEmpty()
-            && !DsProShellApplication.class.getName().equals(meta.originalAppClass)) {
+            && !DsProApplication.class.getName().equals(meta.originalAppClass)) {
             try {
-                ClassLoader cl = DsProDptDecryptor.getActiveClassLoader();
+                ClassLoader cl = DsProCoreLoader.getActiveClassLoader();
                 if (cl == null) {
                     cl = base.getClassLoader();
                 }
@@ -66,6 +69,7 @@ public class DsProShellApplication extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        DsProCoreLoader.verifyGuardBindingIfRequired(this, DsProCoreLoader.getCachedMetadata());
         if (realApplication != null) {
             bindRealApplicationToSystem(realApplication);
             realApplication.onCreate();

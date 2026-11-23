@@ -84,7 +84,7 @@ abstract class BuildGuardDexTask : DefaultTask() {
   abstract val javaSource: RegularFileProperty
 
   @get:InputFiles
-  abstract val dptSources: ConfigurableFileCollection
+  abstract val coreSources: ConfigurableFileCollection
 
   @get:Internal
   abstract val sdkDirectory: DirectoryProperty
@@ -126,15 +126,15 @@ abstract class BuildGuardDexTask : DefaultTask() {
       d8Bin = d8Bin,
     )
 
-    val dptList = dptSources.files
+    val coreList = coreSources.files
       .filter { it.isFile && it.extension == "java" }
       .map { it.absolutePath }
       .sorted()
-    require(dptList.isNotEmpty()) { "No DPT shell Java sources found." }
+    require(coreList.isNotEmpty()) { "No DS PRO core Java sources found." }
     compileDexFromSources(
-      name = "dpt",
-      sourceFiles = dptList,
-      outputDex = outDir.resolve("ds_pro_dpt_shell.dex"),
+      name = "core",
+      sourceFiles = coreList,
+      outputDex = outDir.resolve("ds_pro_core.dex"),
       platformJar = platformJar,
       d8Bin = d8Bin,
     )
@@ -193,7 +193,7 @@ androidComponents {
     val capName = variant.name.replaceFirstChar { it.uppercase() }
     val buildGuardTask = tasks.register<BuildGuardDexTask>("build${capName}GuardDex") {
       javaSource.set(layout.projectDirectory.file("src/main/guard/com/dspro/guard/DsProGuardProvider.java"))
-      dptSources.from(fileTree("src/main/dpt") { include("**/*.java") })
+      coreSources.from(fileTree("src/main/core") { include("**/*.java") })
       sdkDirectory.set(androidComponents.sdkComponents.sdkDirectory)
       outputAssetsDir.set(layout.buildDirectory.dir("generated/dspro_guard_assets/${variant.name}"))
     }

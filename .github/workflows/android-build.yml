@@ -80,7 +80,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run DS PRO Protection & DPT Unit Tests
+      - name: Run DS PRO Protection & Core Unit Tests
         run: |
           set -o pipefail
           if ! gradle :app:testDebugUnitTest --tests com.example.ExampleUnitTest --no-daemon --console=plain --stacktrace 2>&1 | tee test-debug.log; then

@@ -8,7 +8,7 @@ data class AxmlPatchOptions(
     val disableDebuggable: Boolean = false,
     val disableBackup: Boolean = false,
     val injectGuardProvider: Boolean = false,
-    val enableDptShell: Boolean = false,
+    val enableCoreProtection: Boolean = false,
     val packageName: String = "",
 )
 
@@ -17,7 +17,7 @@ data class AxmlPatchResult(
     val debuggableDisabled: Boolean,
     val backupDisabled: Boolean,
     val guardProviderInjected: Boolean,
-    val dptShellInjected: Boolean = false,
+    val coreProtectionInjected: Boolean = false,
     val originalAppClass: String = "",
     val originalFactoryClass: String = "",
     val manifestPackageName: String = "",
@@ -28,7 +28,7 @@ data class AxmlSecuritySummary(
     val isDebuggable: Boolean,
     val allowsBackup: Boolean,
     val hasGuardProvider: Boolean,
-    val hasDptShell: Boolean,
+    val hasCoreProtection: Boolean,
 )
 
 /**
@@ -52,8 +52,8 @@ object AxmlManifestPatcher {
 
     private const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
     const val GUARD_PROVIDER_CLASS = "com.dspro.guard.DsProGuardProvider"
-    const val DPT_SHELL_APP_CLASS = "com.dspro.dpt.DsProShellApplication"
-    const val DPT_SHELL_FACTORY_CLASS = "com.dspro.dpt.DsProAppComponentFactory"
+    const val CORE_APP_CLASS = "com.dspro.core.DsProApplication"
+    const val CORE_FACTORY_CLASS = "com.dspro.core.DsProComponentFactory"
 
     private const val ATTR_NAME = 0x01010003
     private const val ATTR_DEBUGGABLE = 0x0101000f
@@ -226,16 +226,16 @@ object AxmlManifestPatcher {
                             doc.strings.getOrNull(attr.data) == GUARD_PROVIDER_CLASS
                     }
             }
-            val hasDpt = app != null && (
-                getStringAttr(doc, app, ATTR_NAME) == DPT_SHELL_APP_CLASS ||
-                    getStringAttr(doc, app, ATTR_APP_COMPONENT_FACTORY) == DPT_SHELL_FACTORY_CLASS
+            val hasCore = app != null && (
+                getStringAttr(doc, app, ATTR_NAME) == CORE_APP_CLASS ||
+                    getStringAttr(doc, app, ATTR_APP_COMPONENT_FACTORY) == CORE_FACTORY_CLASS
                 )
             AxmlSecuritySummary(
                 packageName = pkg,
                 isDebuggable = dbg,
                 allowsBackup = bkp,
                 hasGuardProvider = hasGuard,
-                hasDptShell = hasDpt,
+                hasCoreProtection = hasCore,
             )
         }.getOrNull()
     }
@@ -244,14 +244,14 @@ object AxmlManifestPatcher {
         if (!options.disableDebuggable &&
             !options.disableBackup &&
             !options.injectGuardProvider &&
-            !options.enableDptShell
+            !options.enableCoreProtection
         ) {
             return AxmlPatchResult(
                 manifestBytes = axmlBytes,
                 debuggableDisabled = false,
                 backupDisabled = false,
                 guardProviderInjected = false,
-                dptShellInjected = false,
+                coreProtectionInjected = false,
                 manifestPackageName = resolvePackageName(axmlBytes),
             )
         }
@@ -268,7 +268,7 @@ object AxmlManifestPatcher {
         var debuggableDisabled = false
         var backupDisabled = false
         var guardProviderInjected = false
-        var dptShellInjected = false
+        var coreProtectionInjected = false
         var originalAppClass = ""
         var originalFactoryClass = ""
 
@@ -286,25 +286,25 @@ object AxmlManifestPatcher {
             backupDisabled = true
         }
 
-        if (options.enableDptShell) {
+        if (options.enableCoreProtection) {
             val nameAttrIdx = doc.ensureResourceAttrString("name", ATTR_NAME)
             val factoryAttrIdx = doc.ensureResourceAttrString("appComponentFactory", ATTR_APP_COMPONENT_FACTORY)
             val androidNsIdx = ensureAndroidNsIndex(doc)
-            val shellAppValIdx = doc.ensurePlainString(DPT_SHELL_APP_CLASS)
-            val shellFactoryValIdx = doc.ensurePlainString(DPT_SHELL_FACTORY_CLASS)
+            val coreAppValIdx = doc.ensurePlainString(CORE_APP_CLASS)
+            val coreFactoryValIdx = doc.ensurePlainString(CORE_FACTORY_CLASS)
 
             val prevAppRaw = getStringAttr(doc, appElem, ATTR_NAME)
-            if (prevAppRaw.isNotBlank() && prevAppRaw != DPT_SHELL_APP_CLASS) {
+            if (prevAppRaw.isNotBlank() && prevAppRaw != CORE_APP_CLASS) {
                 originalAppClass = normalizeClassName(prevAppRaw, manifestPkg)
             }
             val prevFactoryRaw = getStringAttr(doc, appElem, ATTR_APP_COMPONENT_FACTORY)
-            if (prevFactoryRaw.isNotBlank() && prevFactoryRaw != DPT_SHELL_FACTORY_CLASS) {
+            if (prevFactoryRaw.isNotBlank() && prevFactoryRaw != CORE_FACTORY_CLASS) {
                 originalFactoryClass = normalizeClassName(prevFactoryRaw, manifestPkg)
             }
 
-            setOrInsertStringAttr(doc, appElem, androidNsIdx, nameAttrIdx, ATTR_NAME, shellAppValIdx)
-            setOrInsertStringAttr(doc, appElem, androidNsIdx, factoryAttrIdx, ATTR_APP_COMPONENT_FACTORY, shellFactoryValIdx)
-            dptShellInjected = true
+            setOrInsertStringAttr(doc, appElem, androidNsIdx, nameAttrIdx, ATTR_NAME, coreAppValIdx)
+            setOrInsertStringAttr(doc, appElem, androidNsIdx, factoryAttrIdx, ATTR_APP_COMPONENT_FACTORY, coreFactoryValIdx)
+            coreProtectionInjected = true
         }
 
         if (options.injectGuardProvider) {
@@ -400,7 +400,7 @@ object AxmlManifestPatcher {
             debuggableDisabled = debuggableDisabled,
             backupDisabled = backupDisabled,
             guardProviderInjected = guardProviderInjected,
-            dptShellInjected = dptShellInjected,
+            coreProtectionInjected = coreProtectionInjected,
             originalAppClass = originalAppClass,
             originalFactoryClass = originalFactoryClass,
             manifestPackageName = manifestPkg,
@@ -428,7 +428,7 @@ object AxmlManifestPatcher {
         return Triple(dbg, bkp, hasProvider)
     }
 
-    fun inspectDptForTest(axmlBytes: ByteArray): Pair<String, String> {
+    fun inspectCoreForTest(axmlBytes: ByteArray): Pair<String, String> {
         val doc = parse(axmlBytes)
         val app = doc.chunks.filterIsInstance<XmlChunk.StartElement>()
             .firstOrNull { doc.strings.getOrNull(it.nameIdx) == "application" } ?: return "" to ""

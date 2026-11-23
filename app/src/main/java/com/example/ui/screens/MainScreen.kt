@@ -28,8 +28,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Security
@@ -40,9 +38,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -72,18 +68,16 @@ import com.example.ui.components.FeatureInfoDialog
 import com.example.ui.components.GridGroupHeader
 import com.example.ui.components.GridToggleTile
 import com.example.ui.components.KeyValueLine
+import com.example.ui.components.ProtectionPipelineCard
 import com.example.ui.components.SectionCard
 import com.example.ui.components.StatusPill
-import com.example.ui.components.StepResultRow
 import com.example.ui.theme.BorderSubtle
 import com.example.ui.theme.CharcoalText
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.ErrorTint
-import com.example.ui.theme.MonoCodeStyle
 import com.example.ui.theme.ProBlue
 import com.example.ui.theme.ProBlueTint
 import com.example.ui.theme.PureWhite
-import com.example.ui.theme.SlateMuted
 import com.example.ui.theme.SuccessEmerald
 import com.example.ui.theme.SuccessTint
 import com.example.ui.theme.TealAccent
@@ -282,11 +276,11 @@ fun MainScreen(
                                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             verticalArrangement = Arrangement.spacedBy(6.dp),
                                         ) {
-                                            val isProtected = apk.hasDptShell || apk.hasGuardProvider
+                                            val isProtected = apk.hasCoreProtection || apk.hasGuardProvider
                                             StatusPill(
                                                 text = when {
-                                                    apk.hasDptShell && apk.hasGuardProvider -> "DS PRO DPT + Guard"
-                                                    apk.hasDptShell -> "DS PRO DPT Shell"
+                                                    apk.hasCoreProtection && apk.hasGuardProvider -> "DS PRO Protected"
+                                                    apk.hasCoreProtection -> "DS PRO Core"
                                                     apk.hasGuardProvider -> "DS PRO Guard"
                                                     else -> "Unprotected"
                                                 },
@@ -406,77 +400,17 @@ fun MainScreen(
                                 )
                             }
 
-                            if (uiState.isProcessing || uiState.progress > 0) {
-                                LinearProgressIndicator(
-                                    progress = { uiState.progress / 100f },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    color = ProBlue,
-                                    trackColor = BorderSubtle,
-                                )
-                            }
-
-                            uiState.steps.forEach { step ->
-                                StepResultRow(
-                                    title = step.title,
-                                    detail = step.detail,
-                                    status = step.status,
-                                )
-                            }
-
-                            val runResult = uiState.runResult
-                            if (runResult != null && runResult.isValidBuild) {
-                                Surface(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = SuccessTint,
-                                    border = BorderStroke(1.dp, SuccessEmerald.copy(alpha = 0.4f)),
-                                ) {
-                                    Column(
-                                        modifier = Modifier.padding(12.dp),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Folder,
-                                                contentDescription = null,
-                                                tint = SuccessEmerald,
-                                                modifier = Modifier.size(18.dp),
-                                            )
-                                            Text(
-                                                text = "Protected APK Saved (${formatBytes(runResult.outputSizeBytes)})",
-                                                style = MaterialTheme.typography.titleSmall,
-                                                color = CharcoalText,
-                                            )
-                                        }
-                                        runResult.savedLocation?.let { loc ->
-                                            Text(
-                                                text = "${loc.folderDisplay}/${loc.fileName}",
-                                                style = MonoCodeStyle,
-                                                color = SlateMuted,
-                                            )
-                                        }
-                                    }
-                                }
-
-                                OutlinedButton(
-                                    onClick = {
+                            if (uiState.isProcessing || uiState.progress > 0 || uiState.steps.isNotEmpty() || uiState.runResult != null) {
+                                ProtectionPipelineCard(
+                                    isProcessing = uiState.isProcessing,
+                                    progress = uiState.progress,
+                                    steps = uiState.steps,
+                                    runResult = uiState.runResult,
+                                    onExportClick = {
                                         val pkg = uiState.selectedApk?.packageName ?: "app"
                                         exportLauncher.launch("${pkg}_dspro_unsigned.apk")
                                     },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(min = 48.dp)
-                                        .testTag("export_apk_button"),
-                                    shape = RoundedCornerShape(12.dp),
-                                    border = BorderStroke(1.dp, TealAccent),
-                                ) {
-                                    Icon(Icons.Filled.Download, contentDescription = null, tint = TealAccent, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Save Copy As...", color = TealAccent, fontWeight = FontWeight.SemiBold)
-                                }
+                                )
                             }
                         }
                     }
@@ -513,7 +447,7 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
         info = ProtectionFeatureInfo(
             id = "detect_vpn",
             title = "Detect VPN",
-            whatTurnsOn = "Activates VPN Tunnel Monitor at launch and on every Activity resume.",
+            whatTurnsOn = "Activates VPN Tunnel Monitor at launch, on Activity resume, and in the background watchdog.",
             howItWorks = "Checks Android VPN network transports and active tun/ppp/wg/pptp interfaces. If a VPN connection is active, the app crashes with 'VPN detected'.",
         ),
         checked = cfg.detectVpn,
@@ -525,7 +459,7 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
             id = "detect_xposed",
             title = "Detect Xposed / Frida",
             whatTurnsOn = "Activates Anti-Hooking Guard against Xposed, LSPosed, EdXposed, Substrate, and Frida.",
-            howItWorks = "Inspects loaded classes, call stacks, and /proc/self/maps for hooking modules or Frida gadgets. If found, crashes immediately with 'Xposed / Frida hooking detected'.",
+            howItWorks = "Inspects loaded classes, call stacks, active threads (gum-js-loop, linjector), and /proc/self/maps continuously. Crashes immediately if hooking is detected.",
         ),
         checked = cfg.detectXposed,
         tag = "switch_detect_xposed",
@@ -535,8 +469,8 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
         info = ProtectionFeatureInfo(
             id = "detect_debugger",
             title = "Detect Debugger",
-            whatTurnsOn = "Activates Active Debugger & TracerPid Guard at startup and Activity resume.",
-            howItWorks = "Checks Debug.isDebuggerConnected() and /proc/self/status TracerPid for attached JDWP or native ptrace debuggers. Crashes immediately with 'Debugger detected' when attached.",
+            whatTurnsOn = "Activates Active Debugger & TracerPid Guard at startup, resume, and in the live watchdog.",
+            howItWorks = "Checks Debug.isDebuggerConnected() and /proc/self/status TracerPid for attached JDWP or native ptrace debuggers. Crashes immediately when attached.",
         ),
         checked = cfg.detectDebugger,
         tag = "switch_detect_debugger",
@@ -557,8 +491,8 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
         info = ProtectionFeatureInfo(
             id = "anti_tampering",
             title = "Anti Tampering",
-            whatTurnsOn = "Records SHA-256 digests of AndroidManifest.xml, resources.arsc, DEX, .so libs, and assets/dspro_dpt.bin inside encrypted assets/dspro_guard.bin.",
-            howItWorks = "Verifies every tracked file inside the installed APK on startup. If any file is altered or replaced, the app crashes with 'APK tampering detected'.",
+            whatTurnsOn = "Records SHA-256 digests of AndroidManifest.xml, resources.arsc, DEX, .so libs, and assets/dspro_core.bin inside encrypted assets/dspro_guard.bin.",
+            howItWorks = "Verifies every tracked file inside the installed APK at startup and periodically via watchdog. If any file is altered or replaced, the app crashes with 'APK tampering detected'.",
         ),
         checked = cfg.antiTampering,
         tag = "switch_anti_tampering",
@@ -575,19 +509,30 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
         tag = "switch_signature_pinning",
         onToggle = { v -> vm.updateConfig { it.copy(signaturePinning = v) } },
     ),
+    ToggleSpec(
+        info = ProtectionFeatureInfo(
+            id = "anti_dump",
+            title = "Anti Dump",
+            whatTurnsOn = "Activates Live Anti-Dump Watchdog inside DsProGuardProvider and enforces pre-decrypt memory guards.",
+            howItWorks = "Blocks Frida-dexdump, BlackDex, FUPK3/Youpk/DrizzleDumper, Frida sockets (27042/27043), gum-js-loop threads, and ptrace memory dumping both before decryption and continuously at runtime.",
+        ),
+        checked = cfg.antiDump,
+        tag = "switch_anti_dump",
+        onToggle = { v -> vm.updateConfig { it.copy(antiDump = v) } },
+    ),
 )
 
 private fun binaryHardeningToggles(cfg: ProtectionConfig, vm: MainViewModel) = listOf(
     ToggleSpec(
         info = ProtectionFeatureInfo(
-            id = "dpt_dex_encryption",
-            title = "DPT DEX Encrypt",
-            whatTurnsOn = "Encrypts all original classes*.dex payloads with AES-256-GCM into a single container assets/dspro_dpt.bin and injects the in-memory DPT loader shell.",
-            howItWorks = "Replaces classes.dex with DsProAppComponentFactory & DsProShellApplication so static DEX editors only see the loader while original code runs decrypted purely in memory.",
+            id = "dspro_dex_encryption",
+            title = "DS PRO Encrypt",
+            whatTurnsOn = "Encrypts all original classes*.dex payloads with AES-256-GCM into assets/dspro_core.bin, wipes keys after load, and binds guard integrity.",
+            howItWorks = "Replaces classes.dex with stealth DS PRO loader classes (DsProComponentFactory & DsProApplication) so static editors only see the protected loader while original code runs decrypted in memory.",
         ),
-        checked = cfg.dptDexEncryption,
-        tag = "switch_dpt_dex_encryption",
-        onToggle = { v -> vm.updateConfig { it.copy(dptDexEncryption = v) } },
+        checked = cfg.dsProDexEncryption,
+        tag = "switch_dspro_dex_encryption",
+        onToggle = { v -> vm.updateConfig { it.copy(dsProDexEncryption = v) } },
     ),
     ToggleSpec(
         info = ProtectionFeatureInfo(

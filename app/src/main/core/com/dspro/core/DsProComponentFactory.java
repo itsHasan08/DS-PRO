@@ -1,4 +1,4 @@
-package com.dspro.dpt;
+package com.dspro.core;
 
 import android.app.Activity;
 import android.app.AppComponentFactory;
@@ -13,19 +13,19 @@ import dalvik.system.InMemoryDexClassLoader;
 import java.io.File;
 
 /**
- * DPT AppComponentFactory loaded on API 28+.
- * On API 29+, instantiateClassLoader() decrypts original DEX buffers purely in RAM
+ * DS PRO AppComponentFactory loaded on API 28+.
+ * On API 29+, instantiateClassLoader() decrypts protected payloads in memory
  * before any Application, ContentProvider, or Activity is loaded.
  */
-public final class DsProAppComponentFactory extends AppComponentFactory {
+public final class DsProComponentFactory extends AppComponentFactory {
 
     @Override
     public ClassLoader instantiateClassLoader(ClassLoader cl, ApplicationInfo aInfo) {
         if (aInfo == null || aInfo.sourceDir == null || aInfo.packageName == null) {
             return super.instantiateClassLoader(cl, aInfo);
         }
-        if (!DsProDptDecryptor.isInitialized()) {
-            DsProDptDecryptor.DecryptedBundle bundle = DsProDptDecryptor.decryptAll(
+        if (!DsProCoreLoader.isInitialized()) {
+            DsProCoreLoader.DecryptedBundle bundle = DsProCoreLoader.decryptAll(
                 aInfo.sourceDir,
                 aInfo.packageName
             );
@@ -38,7 +38,7 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
 
             AppComponentFactory origFactory = null;
             if (!bundle.metadata.originalFactoryClass.isEmpty()
-                && !DsProAppComponentFactory.class.getName().equals(bundle.metadata.originalFactoryClass)) {
+                && !DsProComponentFactory.class.getName().equals(bundle.metadata.originalFactoryClass)) {
                 try {
                     origFactory = (AppComponentFactory) memLoader
                         .loadClass(bundle.metadata.originalFactoryClass)
@@ -57,11 +57,11 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
                 } catch (Throwable ignored) {
                 }
             }
-            DsProDptDecryptor.markInitialized(aInfo.packageName, bundle.metadata, finalLoader, origFactory);
+            DsProCoreLoader.markInitialized(aInfo.packageName, bundle.metadata, finalLoader, origFactory);
             return finalLoader;
         }
-        if (DsProDptDecryptor.isInitializedFor(aInfo.packageName)) {
-            ClassLoader cached = DsProDptDecryptor.getActiveClassLoader();
+        if (DsProCoreLoader.isInitializedFor(aInfo.packageName)) {
+            ClassLoader cached = DsProCoreLoader.getActiveClassLoader();
             if (cached != null) {
                 return cached;
             }
@@ -98,11 +98,14 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
         ClassLoader loader = activeLoader(cl);
         String targetClass = className;
-        DsProDptDecryptor.DptMetadata meta = DsProDptDecryptor.getCachedMetadata();
-        if (meta != null && DsProShellApplication.class.getName().equals(className)) {
+        DsProCoreLoader.CoreMetadata meta = DsProCoreLoader.getCachedMetadata();
+        if (meta != null && DsProApplication.class.getName().equals(className)) {
             targetClass = meta.originalAppClass.isEmpty()
-                ? Application.class.getName()
+                ? DsProApplication.class.getName()
                 : meta.originalAppClass;
+        }
+        if (DsProApplication.class.getName().equals(targetClass)) {
+            return new DsProApplication();
         }
         AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
@@ -114,6 +117,7 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     @Override
     public Activity instantiateActivity(ClassLoader cl, String className, Intent intent)
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        DsProCoreLoader.assertGuardActiveIfRequired();
         ClassLoader loader = activeLoader(cl);
         AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
@@ -125,6 +129,7 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     @Override
     public BroadcastReceiver instantiateReceiver(ClassLoader cl, String className, Intent intent)
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        DsProCoreLoader.assertGuardActiveIfRequired();
         ClassLoader loader = activeLoader(cl);
         AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
@@ -136,6 +141,7 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     @Override
     public Service instantiateService(ClassLoader cl, String className, Intent intent)
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        DsProCoreLoader.assertGuardActiveIfRequired();
         ClassLoader loader = activeLoader(cl);
         AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
@@ -147,6 +153,9 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     @Override
     public ContentProvider instantiateProvider(ClassLoader cl, String className)
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+        if ("com.dspro.guard.DsProGuardProvider".equals(className)) {
+            DsProCoreLoader.markGuardProviderInstantiated();
+        }
         ClassLoader loader = activeLoader(cl);
         AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
@@ -156,12 +165,12 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     }
 
     private static AppComponentFactory delegateFactory() {
-        Object raw = DsProDptDecryptor.getDelegateFactory();
+        Object raw = DsProCoreLoader.getDelegateFactory();
         return (raw instanceof AppComponentFactory) ? (AppComponentFactory) raw : null;
     }
 
     private static ClassLoader activeLoader(ClassLoader fallback) {
-        ClassLoader active = DsProDptDecryptor.getActiveClassLoader();
+        ClassLoader active = DsProCoreLoader.getActiveClassLoader();
         return active != null ? active : fallback;
     }
 }
