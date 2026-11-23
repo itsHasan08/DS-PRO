@@ -1,0 +1,6 @@
+{
+  "name": "DS PRO",
+  "description": "Native Android APK Protection, Inspection & Runtime Security Tool",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">DS PRO</string>
+    <string name="cd_app_shield">DS PRO</string>
+    <string name="select_apk">Select APK</string>
+    <string name="start_protection">Start</string>
+    <string name="export_apk">Export APK</string>
+</resources>
