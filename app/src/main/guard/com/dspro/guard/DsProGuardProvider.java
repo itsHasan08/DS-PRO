@@ -5,7 +5,6 @@ import android.app.Application;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
-import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
@@ -18,33 +17,61 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Debug;
-import android.os.Process;
+import android.util.Log;
 import android.view.WindowManager;
 
-import org.json.JSONObject;
-
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.List;
 import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
 /**
  * Runtime protection guard compiled into ds_pro_guard.dex and injected into protected APKs.
- * Executes inside ContentProvider.onCreate() before Application.onCreate().
+ * Reads encrypted binary security configuration from assets/ and enforces checks in ContentProvider.onCreate().
  */
 public final class DsProGuardProvider extends ContentProvider {
 
-    private static final String CONFIG_ASSET = "ds_pro_security_config.json";
-    private static final String INTEGRITY_ASSET = "ds_pro_integrity.sha256";
+    private static final String TAG = "DsProGuard";
+
+    private static final int FLAG_DETECT_ROOT = 1;
+    private static final int FLAG_DETECT_EMULATOR = 1 << 1;
+    private static final int FLAG_DETECT_VPN = 1 << 2;
+    private static final int FLAG_DETECT_XPOSED = 1 << 3;
+    private static final int FLAG_DETECT_DEBUGGER = 1 << 4;
+    private static final int FLAG_ANTI_SCREENSHOT = 1 << 5;
+    private static final int FLAG_ANTI_TAMPERING = 1 << 6;
+    private static final int FLAG_SIGNATURE_PINNING = 1 << 7;
+
+    private static final class GuardPolicy {
+        final int flags;
+        final String pinnedCertSha256;
+        final List<String> integrityEntries;
+
+        GuardPolicy(int flags, String pinnedCertSha256, List<String> integrityEntries) {
+            this.flags = flags;
+            this.pinnedCertSha256 = pinnedCertSha256;
+            this.integrityEntries = integrityEntries;
+        }
+
+        boolean has(int flag) {
+            return (flags & flag) != 0;
+        }
+    }
 
     @Override
     public boolean onCreate() {
@@ -53,16 +80,16 @@ public final class DsProGuardProvider extends ContentProvider {
             return true;
         }
 
-        final JSONObject config = readConfig(context);
-        if (config == null) {
+        final GuardPolicy policy = readEncryptedPolicy(context);
+        if (policy == null) {
             return true;
         }
 
-        enforceChecks(context, config);
+        enforceChecks(context, policy);
 
-        final boolean antiScreenshot = config.optBoolean("antiScreenshot", false);
-        final boolean detectVpn = config.optBoolean("detectVpn", false);
-        final boolean detectDebugger = config.optBoolean("detectDebugger", false);
+        final boolean antiScreenshot = policy.has(FLAG_ANTI_SCREENSHOT);
+        final boolean detectVpn = policy.has(FLAG_DETECT_VPN);
+        final boolean detectDebugger = policy.has(FLAG_DETECT_DEBUGGER);
 
         if (antiScreenshot || detectVpn || detectDebugger) {
             final Context appCtx = context.getApplicationContext();
@@ -85,11 +112,11 @@ public final class DsProGuardProvider extends ContentProvider {
                             if (antiScreenshot && activity.getWindow() != null) {
                                 activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
                             }
-                            if (detectDebugger && isDebuggerAttached(activity)) {
-                                terminate("Debugger detected");
+                            if (detectDebugger && isDebuggerAttached()) {
+                                crashWithReason("Debugger detected");
                             }
                             if (detectVpn && isVpnActive(activity)) {
-                                terminate("VPN connection detected");
+                                crashWithReason("VPN detected");
                             }
                         }
 
@@ -116,47 +143,116 @@ public final class DsProGuardProvider extends ContentProvider {
         return true;
     }
 
-    private static void enforceChecks(Context context, JSONObject config) {
-        if (config.optBoolean("detectDebugger", false) && isDebuggerAttached(context)) {
-            terminate("Debugger detected");
+    private static void enforceChecks(Context context, GuardPolicy policy) {
+        if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
+            crashWithReason("Debugger detected");
         }
-        if (config.optBoolean("detectRoot", false) && isDeviceRooted()) {
-            terminate("Root environment detected");
+        if (policy.has(FLAG_DETECT_ROOT) && isDeviceRooted()) {
+            crashWithReason("Root detected");
         }
-        if (config.optBoolean("detectEmulator", false) && isEmulator()) {
-            terminate("Emulator environment detected");
+        if (policy.has(FLAG_DETECT_EMULATOR) && isEmulator()) {
+            crashWithReason("Emulator detected");
         }
-        if (config.optBoolean("detectVpn", false) && isVpnActive(context)) {
-            terminate("VPN connection detected");
+        if (policy.has(FLAG_DETECT_VPN) && isVpnActive(context)) {
+            crashWithReason("VPN detected");
         }
-        if (config.optBoolean("detectXposed", false) && isHookingFrameworkPresent()) {
-            terminate("Hooking framework detected");
+        if (policy.has(FLAG_DETECT_XPOSED) && isHookingFrameworkPresent()) {
+            crashWithReason("Xposed / Frida hooking detected");
         }
-        if (config.optBoolean("antiTampering", false) && !verifyApkIntegrity(context)) {
-            terminate("APK integrity verification failed");
+        if (policy.has(FLAG_ANTI_TAMPERING) && !verifyApkIntegrity(context, policy.integrityEntries)) {
+            crashWithReason("APK tampering detected");
         }
-        if (config.optBoolean("signaturePinning", false)) {
-            final String expectedCert = config.optString("pinnedCertSha256", "");
+        if (policy.has(FLAG_SIGNATURE_PINNING)) {
+            final String expectedCert = policy.pinnedCertSha256;
             if (!expectedCert.isEmpty() && !"UNSIGNED".equalsIgnoreCase(expectedCert)) {
                 if (!verifySigningCert(context, expectedCert)) {
-                    terminate("APK signature mismatch");
+                    crashWithReason("APK signature mismatch");
                 }
             }
         }
     }
 
-    private static JSONObject readConfig(Context context) {
-        try (InputStream in = context.getAssets().open(CONFIG_ASSET)) {
-            byte[] buf = new byte[4096];
-            StringBuilder sb = new StringBuilder();
-            int n;
-            while ((n = in.read(buf)) != -1) {
-                sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
-            }
-            return new JSONObject(sb.toString());
+    private static GuardPolicy readEncryptedPolicy(Context context) {
+        final String pkg = context.getPackageName();
+        final String assetName;
+        try {
+            assetName = computeAssetName(pkg);
         } catch (Throwable ignored) {
             return null;
         }
+
+        byte[] blob;
+        try (InputStream in = context.getAssets().open(assetName)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream(1024);
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                out.write(buf, 0, n);
+            }
+            blob = out.toByteArray();
+        } catch (Throwable ignored) {
+            return null;
+        }
+
+        if (blob.length <= 28) {
+            crashWithReason("Security policy tampered");
+            return null;
+        }
+
+        try {
+            byte[] salt = new byte[16];
+            byte[] iv = new byte[12];
+            System.arraycopy(blob, 0, salt, 0, 16);
+            System.arraycopy(blob, 16, iv, 0, 12);
+            String saltHex = toLowerHex(salt);
+            byte[] keyBytes = MessageDigest.getInstance("SHA-256").digest(
+                (pkg + ":DSPRO_GCFG_KEY:" + saltHex).getBytes(StandardCharsets.UTF_8)
+            );
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                new SecretKeySpec(keyBytes, "AES"),
+                new GCMParameterSpec(128, iv)
+            );
+            byte[] plain = cipher.doFinal(blob, 28, blob.length - 28);
+            String text = new String(plain, StandardCharsets.UTF_8);
+            String[] lines = text.split("\n");
+            if (lines.length < 3) {
+                crashWithReason("Security policy tampered");
+                return null;
+            }
+            int flags = Integer.parseInt(lines[0].trim());
+            String pinnedCert = lines[1].trim();
+            int integrityCount = Integer.parseInt(lines[2].trim());
+            List<String> integrityEntries = new ArrayList<>(Math.max(0, integrityCount));
+            for (int i = 0; i < integrityCount && (3 + i) < lines.length; i++) {
+                String row = lines[3 + i].trim();
+                if (!row.isEmpty()) {
+                    integrityEntries.add(row);
+                }
+            }
+            return new GuardPolicy(flags, pinnedCert, integrityEntries);
+        } catch (SecurityException se) {
+            throw se;
+        } catch (Throwable t) {
+            crashWithReason("Security policy tampered");
+            return null;
+        }
+    }
+
+    private static String computeAssetName(String pkg) throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(
+            (pkg + ":DSPRO_GCFG_NAME").getBytes(StandardCharsets.UTF_8)
+        );
+        return toLowerHex(digest).substring(0, 8) + ".bin";
+    }
+
+    private static String toLowerHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format(Locale.US, "%02x", b & 0xFF));
+        }
+        return sb.toString();
     }
 
     private static boolean isDeviceRooted() {
@@ -279,7 +375,7 @@ public final class DsProGuardProvider extends ContentProvider {
         return containsInFile("/proc/self/maps", "xposed", "lsposed", "edxposed", "frida-agent", "frida-gadget", "libsubstrate");
     }
 
-    private static boolean isDebuggerAttached(Context context) {
+    private static boolean isDebuggerAttached() {
         if (Debug.isDebuggerConnected() || Debug.waitingForDebugger()) {
             return true;
         }
@@ -299,25 +395,19 @@ public final class DsProGuardProvider extends ContentProvider {
         return false;
     }
 
-    private static boolean verifyApkIntegrity(Context context) {
-        try (BufferedReader manifestReader = new BufferedReader(
-            new InputStreamReader(context.getAssets().open(INTEGRITY_ASSET), StandardCharsets.UTF_8)
-        );
-             ZipFile apkZip = new ZipFile(context.getPackageCodePath())) {
-
-            String line;
+    private static boolean verifyApkIntegrity(Context context, List<String> entries) {
+        if (entries == null || entries.isEmpty()) {
+            return false;
+        }
+        try (ZipFile apkZip = new ZipFile(context.getPackageCodePath())) {
             int verified = 0;
-            while ((line = manifestReader.readLine()) != null) {
-                String trimmed = line.trim();
-                if (trimmed.isEmpty()) {
-                    continue;
-                }
-                int sep = trimmed.indexOf("  ");
+            for (String row : entries) {
+                int sep = row.indexOf('|');
                 if (sep <= 0) {
                     return false;
                 }
-                String expectedHex = trimmed.substring(0, sep).trim().toLowerCase(Locale.US);
-                String entryName = trimmed.substring(sep + 2).trim();
+                String expectedHex = row.substring(0, sep).trim().toLowerCase(Locale.US);
+                String entryName = row.substring(sep + 1).trim();
                 ZipEntry entry = apkZip.getEntry(entryName);
                 if (entry == null) {
                     return false;
@@ -379,12 +469,7 @@ public final class DsProGuardProvider extends ContentProvider {
                 md.update(buf, 0, n);
             }
         }
-        byte[] digest = md.digest();
-        StringBuilder sb = new StringBuilder(digest.length * 2);
-        for (byte b : digest) {
-            sb.append(String.format(Locale.US, "%02x", b & 0xFF));
-        }
-        return sb.toString();
+        return toLowerHex(md.digest());
     }
 
     private static boolean containsInFile(String filePath, String... needles) {
@@ -407,10 +492,10 @@ public final class DsProGuardProvider extends ContentProvider {
         return s == null ? "" : s.toLowerCase(Locale.US);
     }
 
-    private static void terminate(String reason) {
-        Process.killProcess(Process.myPid());
-        System.exit(10);
-        throw new SecurityException("DS PRO: " + reason);
+    private static void crashWithReason(String reason) {
+        final String message = "DS PRO Protection: " + reason;
+        Log.e(TAG, message);
+        throw new SecurityException(message);
     }
 
     @Override

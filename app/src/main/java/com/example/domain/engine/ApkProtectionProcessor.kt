@@ -11,6 +11,8 @@ import com.example.domain.model.StepStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
@@ -164,7 +166,7 @@ class ApkProtectionProcessor(
                 id = "dpt",
                 title = "DPT DEX Encryption (AES-256-GCM)",
                 status = StepStatus.SUCCESS,
-                detail = "Encrypted ${stats.encryptedDexCount} DEX file(s) & replaced classes.dex with in-memory shell.",
+                detail = "Encrypted ${stats.encryptedDexCount} DEX file(s) into single stealth container.",
             )
         }
         onProgress(38, steps.toList())
@@ -200,7 +202,7 @@ class ApkProtectionProcessor(
                 id = "guard",
                 title = "Runtime Guard Injected",
                 status = StepStatus.SUCCESS,
-                detail = "${stats.injectedGuardDexName ?: "classes2.dex"} -> ${guards.joinToString(", ")}",
+                detail = "${stats.injectedGuardDexName ?: "classes2.dex"} -> encrypted policy (${guards.joinToString(", ")})",
             )
         }
         onProgress(70, steps.toList())
@@ -285,6 +287,16 @@ class ApkProtectionProcessor(
         private const val GUARD_DESCRIPTOR = "Lcom/dspro/guard/DsProGuardProvider;"
         private const val DPT_DESCRIPTOR = "Lcom/dspro/dpt/DsProShellApplication;"
 
+        fun guardConfigAssetPath(packageName: String): String {
+            val shortHash = sha256Hex("$packageName:DSPRO_GCFG_NAME".toByteArray(Charsets.UTF_8)).substring(0, 8)
+            return "assets/$shortHash.bin"
+        }
+
+        fun dptContainerAssetPath(packageName: String): String {
+            val shortHash = sha256Hex("$packageName:DSPRO_DPT_NAME".toByteArray(Charsets.UTF_8)).substring(0, 8)
+            return "assets/$shortHash.bin"
+        }
+
         fun transformApkArchive(
             inputFile: File,
             outputFile: File,
@@ -327,13 +339,35 @@ class ApkProtectionProcessor(
                 ZipOutputStream(countingOut).use { zipOut ->
                     zipOut.setLevel(if (config.bestCompression) Deflater.BEST_COMPRESSION else Deflater.DEFAULT_COMPRESSION)
                     val written = hashSetOf<String>()
+
+                    val rawManifestEntry = zipIn.getEntry("AndroidManifest.xml")
+                        ?: error("Selected APK does not contain AndroidManifest.xml.")
+                    val rawManifestInitial = zipIn.getInputStream(rawManifestEntry).use { it.readBytes() }
+                    val manifestSummary = AxmlManifestPatcher.inspectSecuritySummary(rawManifestInitial)
+                    val manifestPkg = manifestSummary?.packageName.orEmpty()
+                    val effectivePackageName = manifestPkg.ifBlank {
+                        analysis.packageName.takeIf { it.isNotBlank() && it != "unknown.package" }.orEmpty()
+                    }
+                    val guardAssetName = guardConfigAssetPath(effectivePackageName)
+                    val dptAssetName = dptContainerAssetPath(effectivePackageName)
+                    val inputHasDptShell = manifestSummary?.hasDptShell == true || zipIn.getEntry(dptAssetName) != null
+                    val inputHasGuardProvider = manifestSummary?.hasGuardProvider == true
+
+                    require(!(config.dptDexEncryption && inputHasDptShell)) {
+                        "Input APK is already DPT-encrypted by DS PRO."
+                    }
+
                     val entries = zipIn.entries()
                     while (entries.hasMoreElements()) {
                         val entry = entries.nextElement()
                         if (entry.isDirectory) continue
                         val name = entry.name
 
-                        if (isV1SignatureEntry(name) || name.startsWith("assets/ds_pro_")) {
+                        if (isV1SignatureEntry(name) ||
+                            name.startsWith("assets/ds_pro_") ||
+                            name == guardAssetName ||
+                            name == dptAssetName
+                        ) {
                             continue
                         }
                         if (config.stripMetadataBloat && isBloatEntry(name)) {
@@ -344,9 +378,10 @@ class ApkProtectionProcessor(
                         val rawBytes = zipIn.getInputStream(entry).use { it.readBytes() }
 
                         if (isClassesDex(name)) {
-                            if (DexPatcher.containsAsciiMarker(rawBytes, GUARD_DESCRIPTOR) ||
-                                DexPatcher.containsAsciiMarker(rawBytes, DPT_DESCRIPTOR)
-                            ) {
+                            if (inputHasDptShell && DexPatcher.containsAsciiMarker(rawBytes, DPT_DESCRIPTOR)) {
+                                continue
+                            }
+                            if (inputHasGuardProvider && DexPatcher.containsAsciiMarker(rawBytes, GUARD_DESCRIPTOR)) {
                                 continue
                             }
                             var dexBytes = rawBytes
@@ -369,17 +404,12 @@ class ApkProtectionProcessor(
                             name.endsWith(".so")
                         if (writeZipBytes(countingOut, zipOut, written, name, rawBytes, keepStored = shouldPreserveStored)) {
                             if (config.antiTampering && isIntegrityTrackedEntry(name)) {
-                                integrityLines += "${sha256Hex(rawBytes)}  $name"
+                                integrityLines += "${sha256Hex(rawBytes)}|$name"
                             }
                         }
                     }
 
-                    val rawManifest = manifestBytes
-                        ?: error("Selected APK does not contain AndroidManifest.xml.")
-                    val manifestPkg = AxmlManifestPatcher.resolvePackageName(rawManifest)
-                    val effectivePackageName = manifestPkg.ifBlank {
-                        analysis.packageName.takeIf { it.isNotBlank() && it != "unknown.package" }.orEmpty()
-                    }
+                    val rawManifest = manifestBytes ?: rawManifestInitial
 
                     val finalManifest = if (
                         config.disableDebuggable ||
@@ -410,7 +440,7 @@ class ApkProtectionProcessor(
 
                     if (writeZipBytes(countingOut, zipOut, written, "AndroidManifest.xml", finalManifest)) {
                         if (config.antiTampering) {
-                            integrityLines += "${sha256Hex(finalManifest)}  AndroidManifest.xml"
+                            integrityLines += "${sha256Hex(finalManifest)}|AndroidManifest.xml"
                         }
                     }
 
@@ -419,53 +449,22 @@ class ApkProtectionProcessor(
                         require(sortedOriginalDex.isNotEmpty()) { "No classes.dex found to encrypt." }
 
                         val rng = SecureRandom()
-                        val aesKey = ByteArray(32).also { rng.nextBytes(it) }
-                        val salt = ByteArray(16).also { rng.nextBytes(it) }
-                        val saltHex = salt.joinToString("") { "%02x".format(it) }
-                        val keySpec = SecretKeySpec(aesKey, "AES")
-
-                        sortedOriginalDex.forEachIndexed { idx, (_, dexBytes) ->
-                            val iv = ByteArray(12).also { rng.nextBytes(it) }
-                            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                            cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
-                            val cipherText = cipher.doFinal(dexBytes)
-                            val payload = ByteArray(iv.size + cipherText.size)
-                            System.arraycopy(iv, 0, payload, 0, iv.size)
-                            System.arraycopy(cipherText, 0, payload, iv.size, cipherText.size)
-
-                            val payloadEntry = "assets/ds_pro_dpt_$idx.bin"
-                            if (writeZipBytes(countingOut, zipOut, written, payloadEntry, payload)) {
-                                if (config.antiTampering) {
-                                    integrityLines += "${sha256Hex(payload)}  $payloadEntry"
-                                }
-                            }
-                        }
-
-                        val mask = MessageDigest.getInstance("SHA-256").digest(
-                            "$effectivePackageName:DSPRO_DPT_V1:${sortedOriginalDex.size}:$saltHex"
-                                .toByteArray(Charsets.UTF_8),
+                        val dptContainerBytes = buildEncryptedDptContainer(
+                            rng = rng,
+                            packageName = effectivePackageName,
+                            originalAppClass = originalAppClass,
+                            originalFactoryClass = originalFactoryClass,
+                            dexPayloads = sortedOriginalDex.map { it.second },
                         )
-                        val maskedKeyHex = ByteArray(aesKey.size) { i ->
-                            (aesKey[i].toInt() xor mask[i].toInt()).toByte()
-                        }.joinToString("") { "%02x".format(it) }
-
-                        val idxBytes = buildString {
-                            appendLine("DSPRO_DPT_V1")
-                            appendLine(sortedOriginalDex.size)
-                            appendLine(originalAppClass)
-                            appendLine(originalFactoryClass)
-                            appendLine(saltHex)
-                            appendLine(maskedKeyHex)
-                        }.toByteArray(Charsets.UTF_8)
-                        if (writeZipBytes(countingOut, zipOut, written, "assets/ds_pro_dpt.idx", idxBytes)) {
+                        if (writeZipBytes(countingOut, zipOut, written, dptAssetName, dptContainerBytes)) {
                             if (config.antiTampering) {
-                                integrityLines += "${sha256Hex(idxBytes)}  assets/ds_pro_dpt.idx"
+                                integrityLines += "${sha256Hex(dptContainerBytes)}|$dptAssetName"
                             }
                         }
 
                         if (writeZipBytes(countingOut, zipOut, written, "classes.dex", dptShellDexBytes)) {
                             if (config.antiTampering) {
-                                integrityLines += "${sha256Hex(dptShellDexBytes)}  classes.dex"
+                                integrityLines += "${sha256Hex(dptShellDexBytes)}|classes.dex"
                             }
                         }
 
@@ -474,7 +473,7 @@ class ApkProtectionProcessor(
                             injectedGuardDexName = guardDexName
                             if (writeZipBytes(countingOut, zipOut, written, guardDexName, guardDexBytes)) {
                                 if (config.antiTampering) {
-                                    integrityLines += "${sha256Hex(guardDexBytes)}  $guardDexName"
+                                    integrityLines += "${sha256Hex(guardDexBytes)}|$guardDexName"
                                 }
                             }
                         }
@@ -484,7 +483,7 @@ class ApkProtectionProcessor(
                             maxDexIndex = maxOf(maxDexIndex, parseDexIndex(dexName))
                             if (writeZipBytes(countingOut, zipOut, written, dexName, dexBytes)) {
                                 if (config.antiTampering) {
-                                    integrityLines += "${sha256Hex(dexBytes)}  $dexName"
+                                    integrityLines += "${sha256Hex(dexBytes)}|$dexName"
                                 }
                             }
                         }
@@ -494,19 +493,21 @@ class ApkProtectionProcessor(
                             injectedGuardDexName = guardDexName
                             if (writeZipBytes(countingOut, zipOut, written, guardDexName, guardDexBytes)) {
                                 if (config.antiTampering) {
-                                    integrityLines += "${sha256Hex(guardDexBytes)}  $guardDexName"
+                                    integrityLines += "${sha256Hex(guardDexBytes)}|$guardDexName"
                                 }
                             }
                         }
                     }
 
                     if (config.requiresRuntimeGuard) {
-                        val cfgBytes = buildSecurityConfig(analysis, config, effectivePackageName).toByteArray(Charsets.UTF_8)
-                        writeZipBytes(countingOut, zipOut, written, "assets/ds_pro_security_config.json", cfgBytes)
-                    }
-                    if (config.antiTampering) {
-                        val integrityBytes = (integrityLines.joinToString("\n") + "\n").toByteArray(Charsets.UTF_8)
-                        writeZipBytes(countingOut, zipOut, written, "assets/ds_pro_integrity.sha256", integrityBytes)
+                        val encryptedPolicyBytes = buildEncryptedGuardPolicy(
+                            rng = SecureRandom(),
+                            packageName = effectivePackageName,
+                            analysis = analysis,
+                            config = config,
+                            integrityEntries = integrityLines,
+                        )
+                        writeZipBytes(countingOut, zipOut, written, guardAssetName, encryptedPolicyBytes)
                     }
 
                     zipOut.flush()
@@ -526,6 +527,98 @@ class ApkProtectionProcessor(
                 inputSizeBytes = inputFile.length(),
                 outputSizeBytes = outputFile.length(),
             )
+        }
+
+        private fun buildEncryptedDptContainer(
+            rng: SecureRandom,
+            packageName: String,
+            originalAppClass: String,
+            originalFactoryClass: String,
+            dexPayloads: List<ByteArray>,
+        ): ByteArray {
+            val aesKey = ByteArray(32).also { rng.nextBytes(it) }
+            val salt = ByteArray(16).also { rng.nextBytes(it) }
+            val saltHex = salt.joinToString("") { "%02x".format(it) }
+
+            val metaKey = MessageDigest.getInstance("SHA-256").digest(
+                "$packageName:DSPRO_DPT_META_V2:$saltHex".toByteArray(Charsets.UTF_8),
+            )
+            val aesKeyHex = aesKey.joinToString("") { "%02x".format(it) }
+            val metaPlain = buildString {
+                appendLine(dexPayloads.size)
+                appendLine(originalAppClass)
+                appendLine(originalFactoryClass)
+                append(aesKeyHex)
+            }.toByteArray(Charsets.UTF_8)
+
+            val metaIv = ByteArray(12).also { rng.nextBytes(it) }
+            val metaCipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
+            }.doFinal(metaPlain)
+
+            val out = ByteArrayOutputStream()
+            DataOutputStream(out).use { dos ->
+                dos.write(salt)
+                dos.write(metaIv)
+                dos.writeInt(metaCipher.size)
+                dos.write(metaCipher)
+
+                val keySpec = SecretKeySpec(aesKey, "AES")
+                dexPayloads.forEach { dexBytes ->
+                    val iv = ByteArray(12).also { rng.nextBytes(it) }
+                    val cipherText = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                        init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
+                    }.doFinal(dexBytes)
+                    dos.write(iv)
+                    dos.writeInt(cipherText.size)
+                    dos.write(cipherText)
+                }
+                dos.flush()
+            }
+            return out.toByteArray()
+        }
+
+        private fun buildEncryptedGuardPolicy(
+            rng: SecureRandom,
+            packageName: String,
+            analysis: ApkAnalysisResult,
+            config: ProtectionConfig,
+            integrityEntries: List<String>,
+        ): ByteArray {
+            var flags = 0
+            if (config.detectRoot) flags = flags or 1
+            if (config.detectEmulator) flags = flags or (1 shl 1)
+            if (config.detectVpn) flags = flags or (1 shl 2)
+            if (config.detectXposed) flags = flags or (1 shl 3)
+            if (config.detectDebugger) flags = flags or (1 shl 4)
+            if (config.antiScreenshot) flags = flags or (1 shl 5)
+            if (config.antiTampering) flags = flags or (1 shl 6)
+            if (config.signaturePinning) flags = flags or (1 shl 7)
+
+            val pinnedCert = if (config.signaturePinning && analysis.isSigned) analysis.signingCertSha256 else "UNSIGNED"
+            val entries = if (config.antiTampering) integrityEntries else emptyList()
+            val plain = buildString {
+                appendLine(flags)
+                appendLine(pinnedCert)
+                appendLine(entries.size)
+                entries.forEach { appendLine(it) }
+            }.toByteArray(Charsets.UTF_8)
+
+            val salt = ByteArray(16).also { rng.nextBytes(it) }
+            val iv = ByteArray(12).also { rng.nextBytes(it) }
+            val saltHex = salt.joinToString("") { "%02x".format(it) }
+            val key = MessageDigest.getInstance("SHA-256").digest(
+                "$packageName:DSPRO_GCFG_KEY:$saltHex".toByteArray(Charsets.UTF_8),
+            )
+            val cipherText = Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+            }.doFinal(plain)
+
+            return ByteArray(salt.size + iv.size + cipherText.size).also { out ->
+                System.arraycopy(salt, 0, out, 0, salt.size)
+                System.arraycopy(iv, 0, out, salt.size, iv.size)
+                System.arraycopy(cipherText, 0, out, salt.size + iv.size, cipherText.size)
+            }
         }
 
         fun verifyOutputApk(file: File): Pair<Boolean, String> {
@@ -577,7 +670,7 @@ class ApkProtectionProcessor(
             }
         }
 
-        private const val PAGE_ALIGN_BYTES = 16384 // Satisfies both 4KB and Android 15/16 16KB page sizes
+        private const val PAGE_ALIGN_BYTES = 16384
         private const val DATA_ALIGN_BYTES = 4
         private const val ANDROID_ZIPALIGN_EXTRA_TAG = 0xD935.toShort()
 
@@ -645,7 +738,6 @@ class ApkProtectionProcessor(
         }
 
         private fun isBloatEntry(name: String): Boolean {
-            // Preserve *.kotlin_builtins and *.kotlin_module because kotlin-reflect / Serialization / Compose require them at runtime.
             return name == "DebugProbesKt.bin" ||
                 name == "kotlin-tooling-metadata.json" ||
                 name.startsWith("META-INF/proguard/") ||
@@ -658,31 +750,6 @@ class ApkProtectionProcessor(
                 isClassesDex(name) ||
                 (name.startsWith("lib/") && name.endsWith(".so"))
         }
-
-        private fun buildSecurityConfig(
-            analysis: ApkAnalysisResult,
-            config: ProtectionConfig,
-            packageName: String,
-        ): String {
-            val pinnedCert = if (config.signaturePinning && analysis.isSigned) analysis.signingCertSha256 else "UNSIGNED"
-            return """
-                |{
-                |  "packageName": "${jsonEscape(packageName)}",
-                |  "detectRoot": ${config.detectRoot},
-                |  "detectEmulator": ${config.detectEmulator},
-                |  "detectVpn": ${config.detectVpn},
-                |  "detectXposed": ${config.detectXposed},
-                |  "detectDebugger": ${config.detectDebugger},
-                |  "antiScreenshot": ${config.antiScreenshot},
-                |  "antiTampering": ${config.antiTampering},
-                |  "signaturePinning": ${config.signaturePinning},
-                |  "pinnedCertSha256": "${jsonEscape(pinnedCert)}"
-                |}
-            """.trimMargin()
-        }
-
-        private fun jsonEscape(value: String): String =
-            value.replace("\\", "\\\\").replace("\"", "\\\"")
 
         private fun sha256Hex(bytes: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

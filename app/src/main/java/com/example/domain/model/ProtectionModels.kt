@@ -5,6 +5,13 @@ enum class ProtectionSection(val label: String) {
     BINARY_HARDENING("DPT & APK Hardening"),
 }
 
+data class ProtectionFeatureInfo(
+    val id: String,
+    val title: String,
+    val whatTurnsOn: String,
+    val howItWorks: String,
+)
+
 data class ProtectionConfig(
     // Runtime Guard (all OFF by default — enforced via injected DsProGuardProvider DEX)
     val detectRoot: Boolean = false,
@@ -90,6 +97,10 @@ data class ApkAnalysisResult(
     val logCallMatches: Int,
     val signingCertSha256: String,
     val isSigned: Boolean,
+    val isDebuggable: Boolean = false,
+    val allowsBackup: Boolean = true,
+    val hasGuardProvider: Boolean = false,
+    val hasDptShell: Boolean = false,
 )
 
 enum class StepStatus {

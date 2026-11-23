@@ -87,6 +87,58 @@ class MainViewModel(
         _uiState.update { it.copy(config = transform(it.config)) }
     }
 
+    fun refreshWorkspace() {
+        val currentState = _uiState.value
+        if (currentState.isProcessing || currentState.isLoadingApk) return
+
+        val uriStr = currentState.selectedApkUri
+        if (uriStr == null) {
+            _uiState.update {
+                it.copy(
+                    apkError = null,
+                    progress = 0,
+                    steps = emptyList(),
+                    runResult = null,
+                    statusMessage = "Refreshed.",
+                )
+            }
+            return
+        }
+
+        val parsedUri = runCatching { Uri.parse(uriStr) }.getOrNull() ?: return
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isLoadingApk = true,
+                    apkError = null,
+                    progress = 0,
+                    steps = emptyList(),
+                    runResult = null,
+                )
+            }
+            analyzerEngine.loadApkFromUri(parsedUri)
+                .onSuccess { result ->
+                    _uiState.update {
+                        it.copy(
+                            isLoadingApk = false,
+                            selectedApk = result,
+                            apkError = null,
+                            statusMessage = "Reloaded ${result.fileName}.",
+                        )
+                    }
+                }
+                .onFailure { err ->
+                    _uiState.update {
+                        it.copy(
+                            isLoadingApk = false,
+                            apkError = err.message ?: "Failed to reload APK.",
+                            statusMessage = "Reload failed.",
+                        )
+                    }
+                }
+        }
+    }
+
     fun startProtection() {
         val state = _uiState.value
         val apk = state.selectedApk

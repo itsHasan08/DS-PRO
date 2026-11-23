@@ -8,24 +8,32 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.domain.model.ProtectionFeatureInfo
 import com.example.domain.model.StepStatus
 import com.example.ui.theme.BorderSubtle
 import com.example.ui.theme.CharcoalText
@@ -57,6 +66,8 @@ import com.example.ui.theme.SuccessTint
 @Composable
 fun DsProTopBar(
     activeCount: Int,
+    isRefreshing: Boolean = false,
+    onRefresh: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -72,7 +83,7 @@ fun DsProTopBar(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
@@ -102,11 +113,29 @@ fun DsProTopBar(
                     )
                 }
 
-                StatusPill(
-                    text = "$activeCount Active",
-                    containerColor = ProBlueTint,
-                    contentColor = ProBlue,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    StatusPill(
+                        text = "$activeCount Active",
+                        containerColor = ProBlueTint,
+                        contentColor = ProBlue,
+                    )
+                    IconButton(
+                        onClick = onRefresh,
+                        enabled = !isRefreshing,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("refresh_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = "Refresh",
+                            tint = if (isRefreshing) SlateMuted else ProBlue,
+                        )
+                    }
+                }
             }
             HorizontalDivider(thickness = 1.dp, color = BorderSubtle)
         }
@@ -210,6 +239,7 @@ fun GridToggleTile(
     title: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    onInfoClick: () -> Unit,
     testTag: String,
     modifier: Modifier = Modifier,
 ) {
@@ -225,10 +255,9 @@ fun GridToggleTile(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 52.dp)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+                .heightIn(min = 54.dp)
+                .padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
                 text = title,
@@ -238,22 +267,137 @@ fun GridToggleTile(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .weight(1f)
-                    .padding(end = 6.dp),
+                    .padding(end = 2.dp),
             )
-            Switch(
-                checked = checked,
-                onCheckedChange = onCheckedChange,
-                modifier = Modifier.scale(0.82f),
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = PureWhite,
-                    checkedTrackColor = ProBlue,
-                    uncheckedThumbColor = PureWhite,
-                    uncheckedTrackColor = BorderSubtle,
-                    uncheckedBorderColor = SlateMuted.copy(alpha = 0.4f),
-                ),
-            )
+            IconButton(
+                onClick = onInfoClick,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("info_$testTag"),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = "$title info",
+                    tint = if (checked) ProBlue else SlateMuted,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Box(
+                modifier = Modifier.size(width = 42.dp, height = 48.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Switch(
+                    checked = checked,
+                    onCheckedChange = onCheckedChange,
+                    modifier = Modifier.scale(0.76f),
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = PureWhite,
+                        checkedTrackColor = ProBlue,
+                        uncheckedThumbColor = PureWhite,
+                        uncheckedTrackColor = BorderSubtle,
+                        uncheckedBorderColor = SlateMuted.copy(alpha = 0.4f),
+                    ),
+                )
+            }
         }
     }
+}
+
+@Composable
+fun FeatureInfoDialog(
+    info: ProtectionFeatureInfo,
+    isEnabled: Boolean,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PureWhite,
+        icon = {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(ProBlueTint),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = ProBlue,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        },
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = info.title,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = CharcoalText,
+                )
+                StatusPill(
+                    text = if (isEnabled) "ON" else "OFF",
+                    containerColor = if (isEnabled) SuccessTint else SectionGrey,
+                    contentColor = if (isEnabled) SuccessEmerald else SlateMuted,
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = ProBlueTint.copy(alpha = 0.45f),
+                    border = BorderStroke(1.dp, ProBlue.copy(alpha = 0.25f)),
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "What Turns ON",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = ProBlue,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = info.whatTurnsOn,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = CharcoalText,
+                        )
+                    }
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = SectionGrey,
+                    border = BorderStroke(1.dp, BorderSubtle),
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "How It Works",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = CharcoalText,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = info.howItWorks,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = SlateMuted,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("feature_info_close_button"),
+            ) {
+                Text("Got It", color = ProBlue, fontWeight = FontWeight.SemiBold)
+            }
+        },
+    )
 }
 
 @Composable
@@ -345,6 +489,7 @@ fun StepResultRow(
                 Text(title, style = MaterialTheme.typography.titleSmall, color = CharcoalText)
                 Text(detail, style = MaterialTheme.typography.bodySmall, color = SlateMuted)
             }
+            Spacer(modifier = Modifier.width(4.dp))
             StatusPill(text = label, containerColor = bg, contentColor = fg)
         }
     }

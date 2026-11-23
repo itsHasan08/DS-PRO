@@ -1,17 +1,15 @@
 package com.dspro.dpt;
 
-import android.app.AppComponentFactory;
 import android.os.Build;
 import dalvik.system.InMemoryDexClassLoader;
-import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.BufferedInputStream;
+import java.io.DataInputStream;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import javax.crypto.Cipher;
@@ -19,12 +17,9 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Decrypts AES-256-GCM encrypted DEX payloads purely in memory (zero plaintext DEX on disk).
+ * Decrypts unified AES-256-GCM encrypted DEX container purely in memory (zero plaintext DEX on disk).
  */
 final class DsProDptDecryptor {
-
-    static final String INDEX_ASSET = "assets/ds_pro_dpt.idx";
-    private static final String PAYLOAD_PREFIX = "assets/ds_pro_dpt_";
 
     static final class DptMetadata {
         final int dexCount;
@@ -91,32 +86,65 @@ final class DsProDptDecryptor {
 
     static DecryptedBundle decryptAll(String apkPath, String packageName) {
         try (ZipFile zip = new ZipFile(apkPath)) {
-            DptMetadata meta = readMetadata(zip, packageName);
-            ByteBuffer[] buffers = new ByteBuffer[meta.dexCount];
-            SecretKeySpec keySpec = new SecretKeySpec(meta.aesKey, "AES");
-
-            for (int i = 0; i < meta.dexCount; i++) {
-                ZipEntry entry = zip.getEntry(PAYLOAD_PREFIX + i + ".bin");
-                if (entry == null) {
-                    throw new IllegalStateException("Missing encrypted DEX payload #" + i);
-                }
-                int expectedSize = entry.getSize() > 0 && entry.getSize() <= Integer.MAX_VALUE
-                    ? (int) entry.getSize()
-                    : 65536;
-                byte[] encrypted = readAllBytes(zip.getInputStream(entry), expectedSize);
-                if (encrypted.length <= 12) {
-                    throw new IllegalStateException("Corrupt encrypted DEX payload #" + i);
-                }
-                byte[] iv = new byte[12];
-                System.arraycopy(encrypted, 0, iv, 0, 12);
-
-                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-                cipher.init(Cipher.DECRYPT_MODE, keySpec, new GCMParameterSpec(128, iv));
-                byte[] plainDex = cipher.doFinal(encrypted, 12, encrypted.length - 12);
-                encrypted = null;
-                buffers[i] = ByteBuffer.wrap(plainDex);
+            String assetName = computeContainerAssetName(packageName);
+            ZipEntry entry = zip.getEntry(assetName);
+            if (entry == null) {
+                throw new IllegalStateException("Missing encrypted DEX container.");
             }
-            return new DecryptedBundle(buffers, meta);
+
+            try (DataInputStream dis = new DataInputStream(new BufferedInputStream(zip.getInputStream(entry), 32768))) {
+                byte[] salt = new byte[16];
+                dis.readFully(salt);
+                byte[] metaIv = new byte[12];
+                dis.readFully(metaIv);
+                int metaCipherLen = dis.readInt();
+                if (metaCipherLen <= 16 || metaCipherLen > 1024 * 1024) {
+                    throw new IllegalStateException("Corrupt encrypted container header.");
+                }
+                byte[] metaCipher = new byte[metaCipherLen];
+                dis.readFully(metaCipher);
+
+                String saltHex = toLowerHex(salt);
+                byte[] metaKey = MessageDigest.getInstance("SHA-256").digest(
+                    (packageName + ":DSPRO_DPT_META_V2:" + saltHex).getBytes(StandardCharsets.UTF_8)
+                );
+                Cipher metaDecryptor = Cipher.getInstance("AES/GCM/NoPadding");
+                metaDecryptor.init(
+                    Cipher.DECRYPT_MODE,
+                    new SecretKeySpec(metaKey, "AES"),
+                    new GCMParameterSpec(128, metaIv)
+                );
+                String metaText = new String(metaDecryptor.doFinal(metaCipher), StandardCharsets.UTF_8);
+                String[] lines = metaText.split("\n", -1);
+                if (lines.length < 4) {
+                    throw new IllegalStateException("Invalid encrypted container metadata.");
+                }
+                int dexCount = Integer.parseInt(lines[0].trim());
+                String originalApp = lines[1].trim();
+                String originalFactory = lines[2].trim();
+                byte[] aesKey = hexToBytes(lines[3].trim());
+                DptMetadata meta = new DptMetadata(dexCount, originalApp, originalFactory, aesKey);
+
+                ByteBuffer[] buffers = new ByteBuffer[dexCount];
+                SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
+                byte[] iv = new byte[12];
+                for (int i = 0; i < dexCount; i++) {
+                    dis.readFully(iv);
+                    int cipherLen = dis.readInt();
+                    if (cipherLen <= 16 || cipherLen > 64 * 1024 * 1024) {
+                        throw new IllegalStateException("Corrupt encrypted DEX payload #" + i);
+                    }
+                    byte[] encrypted = new byte[cipherLen];
+                    dis.readFully(encrypted);
+
+                    Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                    cipher.init(Cipher.DECRYPT_MODE, keySpec, new GCMParameterSpec(128, iv));
+                    byte[] plainDex = cipher.doFinal(encrypted);
+                    encrypted = null;
+                    buffers[i] = ByteBuffer.wrap(plainDex);
+                }
+                return new DecryptedBundle(buffers, meta);
+            }
         } catch (Throwable t) {
             throw new SecurityException("DS PRO DPT failed: " + t.getMessage(), t);
         }
@@ -158,54 +186,19 @@ final class DsProDptDecryptor {
         }
     }
 
-    private static DptMetadata readMetadata(ZipFile zip, String packageName) throws Exception {
-        ZipEntry idxEntry = zip.getEntry(INDEX_ASSET);
-        if (idxEntry == null) {
-            throw new IllegalStateException("Missing DPT index metadata.");
-        }
-        try (BufferedReader reader = new BufferedReader(
-            new InputStreamReader(zip.getInputStream(idxEntry), StandardCharsets.UTF_8)
-        )) {
-            String magic = reader.readLine();
-            if (!"DSPRO_DPT_V1".equals(magic)) {
-                throw new IllegalStateException("Invalid DPT index format.");
-            }
-            int dexCount = Integer.parseInt(reader.readLine().trim());
-            String originalApp = reader.readLine();
-            String originalFactory = reader.readLine();
-            String saltHex = reader.readLine().trim();
-            String maskedKeyHex = reader.readLine().trim();
-
-            byte[] mask = MessageDigest.getInstance("SHA-256").digest(
-                (packageName + ":DSPRO_DPT_V1:" + dexCount + ":" + saltHex).getBytes(StandardCharsets.UTF_8)
-            );
-            byte[] maskedKey = hexToBytes(maskedKeyHex);
-            if (maskedKey.length != mask.length) {
-                throw new IllegalStateException("Invalid DPT key length.");
-            }
-            byte[] aesKey = new byte[maskedKey.length];
-            for (int i = 0; i < aesKey.length; i++) {
-                aesKey[i] = (byte) (maskedKey[i] ^ mask[i]);
-            }
-            return new DptMetadata(
-                dexCount,
-                originalApp == null ? "" : originalApp.trim(),
-                originalFactory == null ? "" : originalFactory.trim(),
-                aesKey
-            );
-        }
+    private static String computeContainerAssetName(String packageName) throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(
+            (packageName + ":DSPRO_DPT_NAME").getBytes(StandardCharsets.UTF_8)
+        );
+        return "assets/" + toLowerHex(digest).substring(0, 8) + ".bin";
     }
 
-    private static byte[] readAllBytes(InputStream in, int initialCapacity) throws Exception {
-        try (InputStream stream = in) {
-            ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(1024, initialCapacity));
-            byte[] buf = new byte[32768];
-            int n;
-            while ((n = stream.read(buf)) != -1) {
-                out.write(buf, 0, n);
-            }
-            return out.toByteArray();
+    private static String toLowerHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(String.format(Locale.US, "%02x", b & 0xFF));
         }
+        return sb.toString();
     }
 
     private static byte[] hexToBytes(String hex) {

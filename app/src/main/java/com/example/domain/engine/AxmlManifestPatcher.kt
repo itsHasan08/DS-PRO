@@ -23,6 +23,14 @@ data class AxmlPatchResult(
     val manifestPackageName: String = "",
 )
 
+data class AxmlSecuritySummary(
+    val packageName: String,
+    val isDebuggable: Boolean,
+    val allowsBackup: Boolean,
+    val hasGuardProvider: Boolean,
+    val hasDptShell: Boolean,
+)
+
 /**
  * Parses and modifies compiled binary AndroidManifest.xml (AXML) chunks directly.
  */
@@ -198,6 +206,40 @@ object AxmlManifestPatcher {
         return runCatching { resolvePackageName(parse(axmlBytes)) }.getOrDefault("")
     }
 
+    fun inspectSecuritySummary(axmlBytes: ByteArray): AxmlSecuritySummary? {
+        return runCatching {
+            val doc = parse(axmlBytes)
+            val pkg = resolvePackageName(doc)
+            val app = doc.chunks.filterIsInstance<XmlChunk.StartElement>()
+                .firstOrNull { doc.strings.getOrNull(it.nameIdx) == "application" }
+            val dbg = app?.attributes?.firstOrNull {
+                doc.resourceMap.getOrNull(it.nameIdx) == ATTR_DEBUGGABLE
+            }?.let { it.data != 0 } ?: false
+            val bkp = app?.attributes?.firstOrNull {
+                doc.resourceMap.getOrNull(it.nameIdx) == ATTR_ALLOW_BACKUP
+            }?.let { it.data != 0 } ?: true
+            val hasGuard = doc.chunks.filterIsInstance<XmlChunk.StartElement>().any { elem ->
+                doc.strings.getOrNull(elem.nameIdx) == "provider" &&
+                    elem.attributes.any { attr ->
+                        doc.resourceMap.getOrNull(attr.nameIdx) == ATTR_NAME &&
+                            attr.dataType == TYPE_STRING &&
+                            doc.strings.getOrNull(attr.data) == GUARD_PROVIDER_CLASS
+                    }
+            }
+            val hasDpt = app != null && (
+                getStringAttr(doc, app, ATTR_NAME) == DPT_SHELL_APP_CLASS ||
+                    getStringAttr(doc, app, ATTR_APP_COMPONENT_FACTORY) == DPT_SHELL_FACTORY_CLASS
+                )
+            AxmlSecuritySummary(
+                packageName = pkg,
+                isDebuggable = dbg,
+                allowsBackup = bkp,
+                hasGuardProvider = hasGuard,
+                hasDptShell = hasDpt,
+            )
+        }.getOrNull()
+    }
+
     fun patch(axmlBytes: ByteArray, options: AxmlPatchOptions): AxmlPatchResult {
         if (!options.disableDebuggable &&
             !options.disableBackup &&
@@ -346,14 +388,13 @@ object AxmlManifestPatcher {
                     nameIdx = providerTagIdx,
                 )
 
-                doc.chunks.add(appIdx + 1, providerEnd)
-                doc.chunks.add(appIdx + 1, providerStart)
+                val currentAppIdx = doc.chunks.indexOf(appElem)
+                doc.chunks.add(currentAppIdx + 1, providerEnd)
+                doc.chunks.add(currentAppIdx + 1, providerStart)
             }
             guardProviderInjected = true
         }
 
-        // Re-locate <application> index in case StartNamespace was inserted before it
-        val resolvedAppIdx = doc.chunks.indexOf(appElem)
         return AxmlPatchResult(
             manifestBytes = encode(doc),
             debuggableDisabled = debuggableDisabled,

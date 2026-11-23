@@ -95,7 +95,7 @@ class ApkAnalyzerEngine(private val context: Context) {
 
         var totalEntries = 0
         var hasManifest = false
-        var manifestPackageName = ""
+        var manifestSummary: AxmlSecuritySummary? = null
         var dexCount = 0
         var logCallMatches = 0
 
@@ -108,10 +108,8 @@ class ApkAnalyzerEngine(private val context: Context) {
                 val name = entry.name
                 if (name == "AndroidManifest.xml") {
                     hasManifest = true
-                    if (pmPackageName == null) {
-                        manifestPackageName = zip.getInputStream(entry).use { stream ->
-                            AxmlManifestPatcher.resolvePackageName(stream.readBytes())
-                        }
+                    manifestSummary = zip.getInputStream(entry).use { stream ->
+                        AxmlManifestPatcher.inspectSecuritySummary(stream.readBytes())
                     }
                 } else if (name.startsWith("classes") && name.endsWith(".dex") && name.indexOf('/') == -1) {
                     dexCount++
@@ -138,7 +136,7 @@ class ApkAnalyzerEngine(private val context: Context) {
             "Selected archive does not contain AndroidManifest.xml."
         }
 
-        val packageName = pmPackageName ?: manifestPackageName.ifBlank { "unknown.package" }
+        val packageName = pmPackageName ?: manifestSummary?.packageName.orEmpty().ifBlank { "unknown.package" }
 
         return ApkAnalysisResult(
             fileName = displayName,
@@ -155,6 +153,10 @@ class ApkAnalyzerEngine(private val context: Context) {
             logCallMatches = logCallMatches,
             signingCertSha256 = certSha256,
             isSigned = isSigned,
+            isDebuggable = manifestSummary?.isDebuggable ?: false,
+            allowsBackup = manifestSummary?.allowsBackup ?: true,
+            hasGuardProvider = manifestSummary?.hasGuardProvider ?: false,
+            hasDptShell = manifestSummary?.hasDptShell ?: false,
         )
     }
 

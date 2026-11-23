@@ -86,33 +86,64 @@ class ExampleUnitTest {
         return bytes
     }
 
-    private fun decryptDptPayloads(zip: ZipFile, packageName: String): List<ByteArray> {
-        val idxLines = zip.getInputStream(zip.getEntry("assets/ds_pro_dpt.idx"))
-            .bufferedReader().readLines()
-        assertEquals("DSPRO_DPT_V1", idxLines[0])
-        val dexCount = idxLines[1].toInt()
-        val saltHex = idxLines[4].trim()
-        val maskedKeyHex = idxLines[5].trim()
+    private fun decryptDptPayloads(zip: ZipFile, packageName: String): Pair<List<String>, List<ByteArray>> {
+        val containerName = ApkProtectionProcessor.dptContainerAssetPath(packageName)
+        val entry = zip.getEntry(containerName)
+            ?: throw AssertionError("Missing encrypted DPT container $containerName")
+        zip.getInputStream(entry).use { rawIn ->
+            java.io.DataInputStream(rawIn).use { dis ->
+                val salt = ByteArray(16).also { dis.readFully(it) }
+                val metaIv = ByteArray(12).also { dis.readFully(it) }
+                val metaLen = dis.readInt()
+                val metaCipher = ByteArray(metaLen).also { dis.readFully(it) }
 
-        val mask = MessageDigest.getInstance("SHA-256").digest(
-            "$packageName:DSPRO_DPT_V1:$dexCount:$saltHex".toByteArray(Charsets.UTF_8),
+                val saltHex = salt.joinToString("") { "%02x".format(it) }
+                val metaKey = MessageDigest.getInstance("SHA-256").digest(
+                    "$packageName:DSPRO_DPT_META_V2:$saltHex".toByteArray(Charsets.UTF_8),
+                )
+                val metaPlain = Cipher.getInstance("AES/GCM/NoPadding").run {
+                    init(Cipher.DECRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
+                    String(doFinal(metaCipher), Charsets.UTF_8)
+                }
+                val lines = metaPlain.split("\n")
+                val dexCount = lines[0].trim().toInt()
+                val aesKeyHex = lines[3].trim()
+                val aesKey = ByteArray(aesKeyHex.length / 2) { i ->
+                    ((Character.digit(aesKeyHex[i * 2], 16) shl 4) +
+                        Character.digit(aesKeyHex[i * 2 + 1], 16)).toByte()
+                }
+                val keySpec = SecretKeySpec(aesKey, "AES")
+                val dexList = (0 until dexCount).map {
+                    val iv = ByteArray(12).also { dis.readFully(it) }
+                    val cLen = dis.readInt()
+                    val enc = ByteArray(cLen).also { dis.readFully(it) }
+                    Cipher.getInstance("AES/GCM/NoPadding").run {
+                        init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
+                        doFinal(enc)
+                    }
+                }
+                return lines to dexList
+            }
+        }
+    }
+
+    private fun decryptGuardPolicy(zip: ZipFile, packageName: String): List<String> {
+        val guardName = ApkProtectionProcessor.guardConfigAssetPath(packageName)
+        val entry = zip.getEntry(guardName)
+            ?: throw AssertionError("Missing encrypted Guard policy $guardName")
+        val blob = zip.getInputStream(entry).use { it.readBytes() }
+        assertTrue(blob.size > 28)
+        val salt = blob.copyOfRange(0, 16)
+        val iv = blob.copyOfRange(16, 28)
+        val saltHex = salt.joinToString("") { "%02x".format(it) }
+        val key = MessageDigest.getInstance("SHA-256").digest(
+            "$packageName:DSPRO_GCFG_KEY:$saltHex".toByteArray(Charsets.UTF_8),
         )
-        val maskedKey = ByteArray(maskedKeyHex.length / 2) { i ->
-            ((Character.digit(maskedKeyHex[i * 2], 16) shl 4) +
-                Character.digit(maskedKeyHex[i * 2 + 1], 16)).toByte()
+        val plain = Cipher.getInstance("AES/GCM/NoPadding").run {
+            init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+            String(doFinal(blob, 28, blob.size - 28), Charsets.UTF_8)
         }
-        val aesKey = ByteArray(maskedKey.size) { i ->
-            (maskedKey[i].toInt() xor mask[i].toInt()).toByte()
-        }
-        val keySpec = SecretKeySpec(aesKey, "AES")
-
-        return (0 until dexCount).map { i ->
-            val enc = zip.getInputStream(zip.getEntry("assets/ds_pro_dpt_$i.bin")).readBytes()
-            val iv = enc.copyOfRange(0, 12)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
-            cipher.doFinal(enc, 12, enc.size - 12)
-        }
+        return plain.trimEnd('\n').split("\n")
     }
 
     @Test
@@ -314,8 +345,8 @@ class ExampleUnitTest {
             assertEquals("classes2.dex", stats.injectedGuardDexName)
             assertEquals(4, stats.dexDebugItemsCleared)
             assertEquals(1, stats.strippedBloatCount)
-            // manifest + arsc + lib + dpt_0 + dpt_1 + dpt.idx + shell classes.dex + guard classes2.dex = 8
-            assertEquals(8, stats.integrityCount)
+            // manifest + arsc + lib + single dpt container + shell classes.dex + guard classes2.dex = 6
+            assertEquals(6, stats.integrityCount)
 
             val (valid, _) = ApkProtectionProcessor.verifyOutputApk(outputApk)
             assertTrue(valid)
@@ -324,11 +355,26 @@ class ExampleUnitTest {
                 assertArrayEquals(dptShellDex, outZip.getInputStream(outZip.getEntry("classes.dex")).readBytes())
                 assertArrayEquals(guardDex, outZip.getInputStream(outZip.getEntry("classes2.dex")).readBytes())
                 assertTrue(outZip.getEntry("classes3.dex") == null)
+                assertTrue(outZip.getEntry("assets/ds_pro_security_config.json") == null)
+                assertTrue(outZip.getEntry("assets/ds_pro_integrity.sha256") == null)
+                assertTrue(outZip.getEntry("assets/ds_pro_dpt.idx") == null)
 
-                val decryptedList = decryptDptPayloads(outZip, "com.demo.app")
+                val (_, decryptedList) = decryptDptPayloads(outZip, "com.demo.app")
                 assertEquals(2, decryptedList.size)
                 assertArrayEquals(DexPatcher.stripDebugInfo(appDex1).first, decryptedList[0])
                 assertArrayEquals(DexPatcher.stripDebugInfo(appDex2).first, decryptedList[1])
+
+                val guardBlob = outZip.getInputStream(
+                    outZip.getEntry(ApkProtectionProcessor.guardConfigAssetPath("com.demo.app")),
+                ).use { it.readBytes() }
+                val rawText = String(guardBlob, Charsets.ISO_8859_1)
+                assertFalse(rawText.contains("detectRoot"))
+                assertFalse(rawText.contains("AndroidManifest.xml"))
+
+                val guardLines = decryptGuardPolicy(outZip, "com.demo.app")
+                assertEquals("255", guardLines[0]) // all 8 runtime flags enabled
+                assertEquals("AB:CD:EF", guardLines[1])
+                assertEquals("6", guardLines[2])
 
                 val patchedManifest = outZip.getInputStream(outZip.getEntry("AndroidManifest.xml")).readBytes()
                 val (appName, factoryName) = AxmlManifestPatcher.inspectDptForTest(patchedManifest)
@@ -434,12 +480,13 @@ class ExampleUnitTest {
                 assertEquals(AxmlManifestPatcher.DPT_SHELL_APP_CLASS, shellApp)
                 assertEquals(AxmlManifestPatcher.DPT_SHELL_FACTORY_CLASS, shellFactory)
 
-                val idxLines = zip.getInputStream(zip.getEntry("assets/ds_pro_dpt.idx")).bufferedReader().readLines()
-                assertEquals("androidx.core.app.CoreComponentFactory", idxLines[3])
-
-                val decryptedDexes = decryptDptPayloads(zip, "com.dspro.protection")
+                val (metaLines, decryptedDexes) = decryptDptPayloads(zip, "com.dspro.protection")
+                assertEquals("androidx.core.app.CoreComponentFactory", metaLines[2].trim())
                 assertEquals(stats.encryptedDexCount, decryptedDexes.size)
                 decryptedDexes.forEach { assertTrue(DexPatcher.isValidDex(it)) }
+
+                val summary = AxmlManifestPatcher.inspectSecuritySummary(manifestBytes)
+                assertTrue(summary != null && summary.hasGuardProvider && summary.hasDptShell && !summary.isDebuggable && !summary.allowsBackup)
 
                 assertArrayEquals(dptBytes, zip.getInputStream(zip.getEntry("classes.dex")).readBytes())
                 assertArrayEquals(guardBytes, zip.getInputStream(zip.getEntry("classes2.dex")).readBytes())
@@ -559,9 +606,61 @@ class ExampleUnitTest {
                 assertTrue(zip.getEntry("DebugProbesKt.bin") == null)
 
                 // Decryption must succeed with com.real.target (not unknown.package)
-                val decrypted = decryptDptPayloads(zip, "com.real.target")
+                val (_, decrypted) = decryptDptPayloads(zip, "com.real.target")
                 assertEquals(1, decrypted.size)
                 assertTrue(DexPatcher.isValidDex(decrypted[0]))
+
+                // Only stealth .bin assets added (no ds_pro_* filenames)
+                val assetNames = zip.entries().asSequence().map { it.name }.filter { it.startsWith("assets/") }.toList()
+                assertFalse(assetNames.any { it.contains("ds_pro") })
+                assertEquals(
+                    listOf(
+                        "assets/odd_name_1.txt",
+                        "assets/model.tflite",
+                        ApkProtectionProcessor.dptContainerAssetPath("com.real.target"),
+                        ApkProtectionProcessor.guardConfigAssetPath("com.real.target"),
+                    ).sorted(),
+                    assetNames.sorted(),
+                )
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `binary hardening only adds zero files to assets folder`() {
+        val tempDir = Files.createTempDirectory("dspro_zero_assets_test").toFile()
+        try {
+            val inputApk = File(tempDir, "plain.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.clean.app", debuggable = true, allowBackup = true)
+            val appDex = buildSyntheticDex(withDebugInfo = true)
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+            }
+
+            val outApk = File(tempDir, "hardened_only.apk")
+            ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = outApk,
+                analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.clean.app"),
+                config = ProtectionConfig(
+                    disableDebuggable = true,
+                    disableBackup = true,
+                    stripDexDebug = true,
+                    bestCompression = true,
+                ),
+            )
+
+            ZipFile(outApk).use { zip ->
+                val assetEntries = zip.entries().asSequence().filter { it.name.startsWith("assets/") }.toList()
+                assertTrue(assetEntries.isEmpty())
             }
         } finally {
             tempDir.deleteRecursively()
