@@ -89,7 +89,12 @@ abstract class BuildGuardDexTask : DefaultTask() {
 
   @TaskAction
   fun buildGuardDex() {
-    val sdkDir = sdkDirectory.get().asFile
+    val candidateSdk = sdkDirectory.orNull?.asFile?.takeIf { it.exists() && File(it, "platforms").exists() }
+    val envSdk = System.getenv("ANDROID_HOME")?.let { File(it) }?.takeIf { it.exists() }
+      ?: System.getenv("ANDROID_SDK_ROOT")?.let { File(it) }?.takeIf { it.exists() }
+      ?: File("/opt/android/sdk").takeIf { it.exists() }
+    val sdkDir = candidateSdk ?: envSdk ?: error("Android SDK root directory could not be resolved.")
+    
     val platformJar = File(sdkDir, "platforms/android-36/android.jar").takeIf { it.exists() }
       ?: File(sdkDir, "platforms").listFiles()
         ?.sortedByDescending { it.name }

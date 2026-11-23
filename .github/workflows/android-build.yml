@@ -57,13 +57,13 @@ jobs:
           gradle --version
 
       - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
 
       - name: Run DS PRO Protection & DPT Unit Tests
-        run: gradle :app:testDebugUnitTest --tests com.example.ExampleUnitTest --no-daemon
+        run: gradle :app:testDebugUnitTest --tests com.example.ExampleUnitTest --no-daemon --stacktrace
 
       - name: Verify Release Compilation & Resources
-        run: gradle :app:compileReleaseKotlin :app:processReleaseResources --no-daemon
+        run: gradle :app:compileReleaseKotlin :app:processReleaseResources --no-daemon --stacktrace
 
       - name: Build Signed Release APK (when release secrets configured)
         env:
@@ -76,7 +76,7 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
           export STORE_PASSWORD="$STORE_PASS"
           export KEY_PASSWORD="$KEY_PASS"
-          gradle :app:assembleRelease --no-daemon
+          gradle :app:assembleRelease --no-daemon --stacktrace
 
       - name: Upload DS PRO Debug APK Artifact
         uses: actions/upload-artifact@v4
