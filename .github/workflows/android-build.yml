@@ -23,12 +23,21 @@ jobs:
           java-version: "21"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
 
-      - name: Install Android 36 platform and build-tools
+      - name: Ensure Android 36.1 platform and licenses
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          SDKMGR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMGR" ]; then
+            SDKMGR="$(command -v sdkmanager)"
+          fi
+          set +o pipefail
+          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+          set -o pipefail
+          "$SDKMGR" "platforms;android-36.1" || true
+          "$SDKMGR" --list_installed
 
       - name: Restore debug keystore for APK signing
         run: |
@@ -37,9 +46,15 @@ jobs:
           fi
 
       - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "9.3.1"
+          cache-provider: basic
+
+      - name: Verify Gradle version
+        run: |
+          which gradle
+          gradle --version
 
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon
@@ -68,7 +83,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload DS PRO Release APK Artifact
-        if: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && hashFiles('app/build/outputs/apk/release/*.apk') != '' }}
+        if: hashFiles('app/build/outputs/apk/release/*.apk') != ''
         uses: actions/upload-artifact@v4
         with:
           name: DS-PRO-Release-APK
