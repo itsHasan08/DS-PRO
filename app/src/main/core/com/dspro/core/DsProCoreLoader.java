@@ -9,6 +9,7 @@ import android.os.Debug;
 import dalvik.system.InMemoryDexClassLoader;
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileReader;
@@ -20,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.zip.Inflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import javax.crypto.Cipher;
@@ -215,6 +217,7 @@ final class DsProCoreLoader {
                 String originalFactory = lines[2].trim();
                 aesKey = hexToBytes(lines[3].trim());
                 boolean requireGuard = lines.length >= 5 && "1".equals(lines[4].trim());
+                boolean compressedPayloads = lines.length >= 6 && "Z1".equals(lines[5].trim());
                 if (requireGuard && zip.getEntry(GUARD_POLICY_ASSET) == null) {
                     throw new SecurityException("DS PRO Protection: Guard policy missing");
                 }
@@ -223,6 +226,7 @@ final class DsProCoreLoader {
 
                 ByteBuffer[] buffers = new ByteBuffer[dexCount];
                 SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
+                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
                 byte[] iv = new byte[12];
                 for (int i = 0; i < dexCount; i++) {
                     dis.readFully(iv);
@@ -233,10 +237,13 @@ final class DsProCoreLoader {
                     byte[] encrypted = new byte[cipherLen];
                     dis.readFully(encrypted);
 
-                    Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
                     cipher.init(Cipher.DECRYPT_MODE, keySpec, new GCMParameterSpec(128, iv));
-                    byte[] plainDex = cipher.doFinal(encrypted);
+                    byte[] decrypted = cipher.doFinal(encrypted);
                     Arrays.fill(encrypted, (byte) 0);
+                    byte[] plainDex = compressedPayloads ? inflateBytes(decrypted) : decrypted;
+                    if (compressedPayloads) {
+                        Arrays.fill(decrypted, (byte) 0);
+                    }
                     buffers[i] = ByteBuffer.wrap(plainDex);
                 }
                 return new DecryptedBundle(buffers, meta);
@@ -251,6 +258,27 @@ final class DsProCoreLoader {
             wipe(metaCipher);
             wipe(metaPlainBytes);
             wipe(aesKey);
+        }
+    }
+
+    private static byte[] inflateBytes(byte[] compressed) throws Exception {
+        Inflater inflater = new Inflater();
+        try (ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(compressed.length * 2, 4096))) {
+            inflater.setInput(compressed);
+            byte[] buf = new byte[16 * 1024];
+            while (!inflater.finished()) {
+                int count = inflater.inflate(buf);
+                if (count == 0) {
+                    if (inflater.needsInput() || inflater.needsDictionary()) {
+                        throw new IllegalStateException("Truncated compressed DEX payload.");
+                    }
+                    break;
+                }
+                out.write(buf, 0, count);
+            }
+            return out.toByteArray();
+        } finally {
+            inflater.end();
         }
     }
 

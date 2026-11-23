@@ -22,6 +22,7 @@ import java.nio.ByteOrder
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.zip.CRC32
+import java.util.zip.Inflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -113,13 +114,32 @@ class ExampleUnitTest {
                         Character.digit(aesKeyHex[i * 2 + 1], 16)).toByte()
                 }
                 val keySpec = SecretKeySpec(aesKey, "AES")
+                val isCompressed = lines.size >= 6 && lines[5].trim() == "Z1"
                 val dexList = (0 until dexCount).map {
                     val iv = ByteArray(12).also { dis.readFully(it) }
                     val cLen = dis.readInt()
                     val enc = ByteArray(cLen).also { dis.readFully(it) }
-                    Cipher.getInstance("AES/GCM/NoPadding").run {
+                    val plain = Cipher.getInstance("AES/GCM/NoPadding").run {
                         init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
                         doFinal(enc)
+                    }
+                    if (!isCompressed) {
+                        plain
+                    } else {
+                        val inflater = Inflater()
+                        try {
+                            inflater.setInput(plain)
+                            val out = java.io.ByteArrayOutputStream()
+                            val buf = ByteArray(8192)
+                            while (!inflater.finished()) {
+                                val n = inflater.inflate(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                            }
+                            out.toByteArray()
+                        } finally {
+                            inflater.end()
+                        }
                     }
                 }
                 return lines to dexList
@@ -263,7 +283,7 @@ class ExampleUnitTest {
             val appDex1 = buildSyntheticDex(withDebugInfo = true)
             val appDex2 = buildSyntheticDex(withDebugInfo = true, descriptor = "Lcom/demo/app/Feature;")
             val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
-            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/stub/StubApp;")
+            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/core/DsProApplication;")
             val arscBytes = ByteArray(64) { 0x42 }
             val soBytes = ByteArray(64) { 0x7F }
 
@@ -346,8 +366,8 @@ class ExampleUnitTest {
             assertEquals("classes2.dex", stats.injectedGuardDexName)
             assertEquals(4, stats.dexDebugItemsCleared)
             assertEquals(1, stats.strippedBloatCount)
-            // manifest + arsc + lib + dspro core container + libjiagu.so + core classes.dex + guard classes2.dex = 7
-            assertEquals(7, stats.integrityCount)
+            // manifest + arsc + lib + dspro core container + core classes.dex + guard classes2.dex = 6
+            assertEquals(6, stats.integrityCount)
 
             val (valid, _) = ApkProtectionProcessor.verifyOutputApk(outputApk)
             assertTrue(valid)
@@ -377,18 +397,13 @@ class ExampleUnitTest {
                 val guardLines = decryptGuardPolicy(outZip, "com.demo.app")
                 assertEquals("507", guardLines[0]) // all 8 runtime flags enabled (including antiDump)
                 assertEquals("AB:CD:EF", guardLines[1])
-                assertEquals("7", guardLines[2])
+                assertEquals("6", guardLines[2])
 
-                val jiaguBytes = outZip.getInputStream(outZip.getEntry("assets/libjiagu.so")).readBytes()
-                assertTrue(jiaguBytes.size >= 64)
-                assertEquals(0x7F.toByte(), jiaguBytes[0])
-                assertEquals('E'.code.toByte(), jiaguBytes[1])
-                assertEquals('L'.code.toByte(), jiaguBytes[2])
-                assertEquals('F'.code.toByte(), jiaguBytes[3])
+                assertTrue(outZip.getEntry("assets/libjiagu.so") == null)
 
                 val patchedManifest = outZip.getInputStream(outZip.getEntry("AndroidManifest.xml")).readBytes()
                 val (appName, factoryName) = AxmlManifestPatcher.inspectCoreForTest(patchedManifest)
-                assertEquals("com.stub.StubApp", appName)
+                assertEquals("com.dspro.core.DsProApplication", appName)
                 assertEquals(AxmlManifestPatcher.CORE_FACTORY_CLASS, factoryName)
             }
         } finally {
@@ -422,7 +437,7 @@ class ExampleUnitTest {
         assertTrue(DexPatcher.containsAsciiMarker(guardBytes, "Lcom/dspro/guard/DsProGuardProvider;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProComponentFactory;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProApplication;"))
-        assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/stub/StubApp;"))
+        assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/stub/StubApp;"))
         assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "com/dspro/dpt"))
         assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "com/dspro/dpt"))
 
@@ -518,7 +533,7 @@ class ExampleUnitTest {
             val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.real.target", debuggable = true, allowBackup = true)
             val appDex = buildSyntheticDex(withDebugInfo = true)
             val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
-            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/stub/StubApp;")
+            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/core/DsProApplication;")
             val arscBytes = ByteArray(123) { 0x42 }
             val tfliteBytes = ByteArray(77) { 0x33 }
             val soBytes = ByteArray(256) { 0x7F }
@@ -624,7 +639,7 @@ class ExampleUnitTest {
                 assertEquals(1, decrypted.size)
                 assertTrue(DexPatcher.isValidDex(decrypted[0]))
 
-                // Clean branded encrypted dspro_*.bin assets + 360-recognized assets/libjiagu.so (zero "dpt")
+                // Clean branded encrypted dspro_*.bin assets without StubApp / libjiagu.so / dpt
                 val assetNames = zip.entries().asSequence().map { it.name }.filter { it.startsWith("assets/") }.toList()
                 assertEquals(
                     listOf(
@@ -632,10 +647,10 @@ class ExampleUnitTest {
                         "assets/model.tflite",
                         "assets/dspro_core.bin",
                         "assets/dspro_guard.bin",
-                        "assets/libjiagu.so",
                     ).sorted(),
                     assetNames.sorted(),
                 )
+                assertTrue(zip.getEntry("assets/dspro_core.bin").size < appDex.size)
             }
         } finally {
             tempDir.deleteRecursively()

@@ -176,6 +176,7 @@ abstract class BuildGuardDexTask : DefaultTask() {
       commandLine(
         listOf(
           d8Bin.absolutePath,
+          "--release",
           "--min-api", "26",
           "--lib", platformJar.absolutePath,
           "--output", dexTempDir.absolutePath,

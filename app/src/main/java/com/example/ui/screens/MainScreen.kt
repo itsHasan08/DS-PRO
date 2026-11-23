@@ -503,8 +503,8 @@ private val INFO_ANTI_DUMP = ProtectionFeatureInfo(
 private val INFO_DSPRO_ENCRYPT = ProtectionFeatureInfo(
     id = "dspro_dex_encryption",
     title = "DS PRO Encrypt",
-    whatTurnsOn = "Encrypts all original classes*.dex payloads with AES-256-GCM into assets/dspro_core.bin, emits StubApp + 360-recognized packer signature, wipes keys, and binds guard integrity.",
-    howItWorks = "Replaces classes.dex with com.stub.StubApp + DsProComponentFactory so APK analyzers like MT Manager detect active packer protection while original code runs decrypted in memory.",
+    whatTurnsOn = "Compresses and encrypts all original classes*.dex payloads with AES-256-GCM into assets/dspro_core.bin, injects DsProApplication + DsProComponentFactory, wipes keys, and binds guard integrity.",
+    howItWorks = "Replaces classes.dex with the compact DS PRO loader and decrypts compressed DEX payloads strictly in memory to keep protected APK size minimal.",
 )
 
 private val INFO_DISABLE_DEBUGGABLE = ProtectionFeatureInfo(

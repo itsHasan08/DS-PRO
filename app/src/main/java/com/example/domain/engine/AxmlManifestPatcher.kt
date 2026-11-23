@@ -52,8 +52,7 @@ object AxmlManifestPatcher {
 
     private const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
     const val GUARD_PROVIDER_CLASS = "com.dspro.guard.DsProGuardProvider"
-    const val CORE_APP_CLASS = "com.stub.StubApp"
-    private const val LEGACY_CORE_APP_CLASS = "com.dspro.core.DsProApplication"
+    const val CORE_APP_CLASS = "com.dspro.core.DsProApplication"
     const val CORE_FACTORY_CLASS = "com.dspro.core.DsProComponentFactory"
 
     private const val ATTR_NAME = 0x01010003
@@ -230,7 +229,6 @@ object AxmlManifestPatcher {
             val appClassAttr = app?.let { getStringAttr(doc, it, ATTR_NAME) }.orEmpty()
             val hasCore = app != null && (
                 appClassAttr == CORE_APP_CLASS ||
-                    appClassAttr == LEGACY_CORE_APP_CLASS ||
                     getStringAttr(doc, app, ATTR_APP_COMPONENT_FACTORY) == CORE_FACTORY_CLASS
                 )
             AxmlSecuritySummary(
@@ -297,7 +295,7 @@ object AxmlManifestPatcher {
             val coreFactoryValIdx = doc.ensurePlainString(CORE_FACTORY_CLASS)
 
             val prevAppRaw = getStringAttr(doc, appElem, ATTR_NAME)
-            if (prevAppRaw.isNotBlank() && prevAppRaw != CORE_APP_CLASS && prevAppRaw != LEGACY_CORE_APP_CLASS) {
+            if (prevAppRaw.isNotBlank() && prevAppRaw != CORE_APP_CLASS) {
                 originalAppClass = normalizeClassName(prevAppRaw, manifestPkg)
             }
             val prevFactoryRaw = getStringAttr(doc, appElem, ATTR_APP_COMPONENT_FACTORY)

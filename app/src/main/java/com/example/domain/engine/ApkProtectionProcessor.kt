@@ -286,10 +286,8 @@ class ApkProtectionProcessor(
         const val CORE_DEX_ASSET = "ds_pro_core.dex"
         const val GUARD_POLICY_ASSET = "assets/dspro_guard.bin"
         const val CORE_CONTAINER_ASSET = "assets/dspro_core.bin"
-        const val PACKER_MARKER_ASSET = "assets/libjiagu.so"
         private const val GUARD_DESCRIPTOR = "Lcom/dspro/guard/DsProGuardProvider;"
-        private const val CORE_DESCRIPTOR = "Lcom/stub/StubApp;"
-        private const val LEGACY_CORE_DESCRIPTOR = "Lcom/dspro/core/DsProApplication;"
+        private const val CORE_DESCRIPTOR = "Lcom/dspro/core/DsProApplication;"
 
         fun guardConfigAssetPath(packageName: String): String = GUARD_POLICY_ASSET
 
@@ -332,7 +330,7 @@ class ApkProtectionProcessor(
                 val countingOut = CountingOutputStream(BufferedOutputStream(FileOutputStream(outputFile), 128 * 1024))
                 val copyBuf = ByteArray(64 * 1024)
                 ZipOutputStream(countingOut).use { zipOut ->
-                    zipOut.setLevel(if (config.bestCompression) Deflater.BEST_COMPRESSION else Deflater.BEST_SPEED)
+                    zipOut.setLevel(if (config.bestCompression) Deflater.BEST_COMPRESSION else Deflater.DEFAULT_COMPRESSION)
                     val written = hashSetOf<String>()
 
                     val rawManifestEntry = zipIn.getEntry("AndroidManifest.xml")
@@ -361,7 +359,7 @@ class ApkProtectionProcessor(
                         if (isV1SignatureEntry(name) ||
                             name.startsWith("assets/ds_pro_") ||
                             name.startsWith("assets/dspro_") ||
-                            name == PACKER_MARKER_ASSET ||
+                            name == "assets/libjiagu.so" ||
                             name == guardAssetName ||
                             name == coreAssetName
                         ) {
@@ -374,11 +372,7 @@ class ApkProtectionProcessor(
 
                         if (isClassesDex(name)) {
                             val rawBytes = zipIn.getInputStream(entry).use { it.readBytes() }
-                            if (inputHasCoreProtection && (
-                                    DexPatcher.containsAsciiMarker(rawBytes, CORE_DESCRIPTOR) ||
-                                        DexPatcher.containsAsciiMarker(rawBytes, LEGACY_CORE_DESCRIPTOR)
-                                    )
-                            ) {
+                            if (inputHasCoreProtection && DexPatcher.containsAsciiMarker(rawBytes, CORE_DESCRIPTOR)) {
                                 continue
                             }
                             if (inputHasGuardProvider && DexPatcher.containsAsciiMarker(rawBytes, GUARD_DESCRIPTOR)) {
@@ -490,16 +484,9 @@ class ApkProtectionProcessor(
                             requireGuard = config.requiresRuntimeGuard,
                             dexPayloads = sortedOriginalDex.map { it.second },
                         )
-                        if (writeZipBytes(countingOut, zipOut, written, coreAssetName, coreContainerBytes)) {
+                        if (writeZipBytes(countingOut, zipOut, written, coreAssetName, coreContainerBytes, keepStored = true)) {
                             if (config.antiTampering) {
                                 integrityLines += "${sha256Hex(coreContainerBytes)}|$coreAssetName"
-                            }
-                        }
-
-                        val packerMarkerBytes = buildPackerMarkerStub(effectivePackageName)
-                        if (writeZipBytes(countingOut, zipOut, written, PACKER_MARKER_ASSET, packerMarkerBytes)) {
-                            if (config.antiTampering) {
-                                integrityLines += "${sha256Hex(packerMarkerBytes)}|$PACKER_MARKER_ASSET"
                             }
                         }
 
@@ -548,7 +535,7 @@ class ApkProtectionProcessor(
                             config = config,
                             integrityEntries = integrityLines,
                         )
-                        writeZipBytes(countingOut, zipOut, written, guardAssetName, encryptedPolicyBytes)
+                        writeZipBytes(countingOut, zipOut, written, guardAssetName, encryptedPolicyBytes, keepStored = true)
                     }
 
                     zipOut.flush()
@@ -591,7 +578,8 @@ class ApkProtectionProcessor(
                 appendLine(originalAppClass)
                 appendLine(originalFactoryClass)
                 appendLine(aesKeyHex)
-                append(if (requireGuard) "1" else "0")
+                appendLine(if (requireGuard) "1" else "0")
+                append("Z1")
             }.toByteArray(Charsets.UTF_8)
 
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -609,9 +597,10 @@ class ApkProtectionProcessor(
                 val keySpec = SecretKeySpec(aesKey, "AES")
                 val iv = ByteArray(12)
                 dexPayloads.forEach { dexBytes ->
+                    val compressedDex = deflateBytes(dexBytes, Deflater.BEST_COMPRESSION)
                     rng.nextBytes(iv)
                     cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
-                    val cipherText = cipher.doFinal(dexBytes)
+                    val cipherText = cipher.doFinal(compressedDex)
                     dos.write(iv)
                     dos.writeInt(cipherText.size)
                     dos.write(cipherText)
@@ -621,25 +610,22 @@ class ApkProtectionProcessor(
             return out.toByteArray()
         }
 
-        private fun buildPackerMarkerStub(packageName: String): ByteArray {
-            // Minimal valid 64-byte ELF64 ARM64 header + SHA-256 package fingerprint in assets/libjiagu.so
-            val out = ByteArray(128)
-            // ELF magic + 64-bit LE + v1
-            out[0] = 0x7F
-            out[1] = 'E'.code.toByte()
-            out[2] = 'L'.code.toByte()
-            out[3] = 'F'.code.toByte()
-            out[4] = 2 // ELFCLASS64
-            out[5] = 1 // ELFDATA2LSB
-            out[6] = 1 // EV_CURRENT
-            out[16] = 3 // ET_DYN
-            out[18] = 0xB7.toByte() // EM_AARCH64
-            out[20] = 1 // e_version
-            out[52] = 64 // e_ehsize
-            val hash = MessageDigest.getInstance("SHA-256")
-                .digest("$packageName:DSPRO_STUB_V3".toByteArray(Charsets.UTF_8))
-            System.arraycopy(hash, 0, out, 64, hash.size)
-            return out
+        private fun deflateBytes(input: ByteArray, level: Int): ByteArray {
+            val deflater = Deflater(level)
+            try {
+                deflater.setInput(input)
+                deflater.finish()
+                val out = ByteArrayOutputStream((input.size / 2).coerceAtLeast(256))
+                val buf = ByteArray(16 * 1024)
+                while (!deflater.finished()) {
+                    val count = deflater.deflate(buf)
+                    if (count <= 0) break
+                    out.write(buf, 0, count)
+                }
+                return out.toByteArray()
+            } finally {
+                deflater.end()
+            }
         }
 
         private fun buildEncryptedGuardPolicy(
