@@ -373,7 +373,7 @@ class ExampleUnitTest {
             val analysis = ApkAnalysisResult(
                 fileName = realApk.name,
                 cachedApkPath = realApk.absolutePath,
-                packageName = "com.aistudio.dspro.kxmqzp",
+                packageName = "com.dspro.protection",
                 appName = "DS PRO",
                 versionName = "1.0",
                 versionCode = 1L,
@@ -437,7 +437,7 @@ class ExampleUnitTest {
                 val idxLines = zip.getInputStream(zip.getEntry("assets/ds_pro_dpt.idx")).bufferedReader().readLines()
                 assertEquals("androidx.core.app.CoreComponentFactory", idxLines[3])
 
-                val decryptedDexes = decryptDptPayloads(zip, "com.aistudio.dspro.kxmqzp")
+                val decryptedDexes = decryptDptPayloads(zip, "com.dspro.protection")
                 assertEquals(stats.encryptedDexCount, decryptedDexes.size)
                 decryptedDexes.forEach { assertTrue(DexPatcher.isValidDex(it)) }
 
