@@ -11,7 +11,15 @@ plugins {
 
 android {
   namespace = "com.example"
-  compileSdk { version = release(36) { minorApiLevel = 1 } }
+  val sdkRootPath =
+    System.getenv("ANDROID_HOME")
+      ?: System.getenv("ANDROID_SDK_ROOT")
+      ?: "/opt/android/sdk"
+  if (File(sdkRootPath, "platforms/android-36.1/android.jar").exists()) {
+    compileSdk { version = release(36) { minorApiLevel = 1 } }
+  } else {
+    compileSdk = 36
+  }
 
   defaultConfig {
     applicationId = "com.dspro.protection"

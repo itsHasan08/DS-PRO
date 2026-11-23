@@ -29,21 +29,32 @@ jobs:
 
       - name: Ensure Android 36.1 platform and licenses
         run: |
-          SDKMGR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDKMGR="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           if [ ! -x "$SDKMGR" ]; then
             SDKMGR="$(command -v sdkmanager)"
           fi
           set +o pipefail
-          yes | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+          yes | "$SDKMGR" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
           set -o pipefail
-          "$SDKMGR" "platforms;android-36.1" || true
-          "$SDKMGR" --list_installed
+          if [ ! -f "$SDK_ROOT/platforms/android-36.1/android.jar" ]; then
+            "$SDKMGR" --sdk_root="$SDK_ROOT" "platforms;android-36.1" || \
+            "$SDKMGR" --sdk_root="$SDK_ROOT" --channel=1 "platforms;android-36.1" || \
+            "$SDKMGR" --sdk_root="$SDK_ROOT" --channel=3 "platforms;android-36.1" || true
+          fi
+          ls -la "$SDK_ROOT/platforms" "$SDK_ROOT/build-tools"
 
-      - name: Restore debug keystore for APK signing
+      - name: Restore or create debug keystore for APK signing
         run: |
           if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           fi
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -noprompt -keystore debug.keystore -storepass android \
+              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          keytool -list -keystore debug.keystore -storepass android >/dev/null
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v6
@@ -57,13 +68,33 @@ jobs:
           gradle --version
 
       - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          if ! gradle :app:assembleDebug --no-daemon --console=plain --stacktrace 2>&1 | tee build-debug.log; then
+            {
+              echo "### :app:assembleDebug Failure Log"
+              echo '```text'
+              tail -n 120 build-debug.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Run DS PRO Protection & DPT Unit Tests
-        run: gradle :app:testDebugUnitTest --tests com.example.ExampleUnitTest --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          if ! gradle :app:testDebugUnitTest --tests com.example.ExampleUnitTest --no-daemon --console=plain --stacktrace 2>&1 | tee test-debug.log; then
+            {
+              echo "### Unit Test Failure Log"
+              echo '```text'
+              tail -n 120 test-debug.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Verify Release Compilation & Resources
-        run: gradle :app:compileReleaseKotlin :app:processReleaseResources --no-daemon --stacktrace
+        run: gradle :app:compileReleaseKotlin :app:processReleaseResources --no-daemon --console=plain --stacktrace
 
       - name: Build Signed Release APK (when release secrets configured)
         env:
@@ -76,7 +107,7 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_PATH"
           export STORE_PASSWORD="$STORE_PASS"
           export KEY_PASSWORD="$KEY_PASS"
-          gradle :app:assembleRelease --no-daemon --stacktrace
+          gradle :app:assembleRelease --no-daemon --console=plain --stacktrace
 
       - name: Upload DS PRO Debug APK Artifact
         uses: actions/upload-artifact@v4
