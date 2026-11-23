@@ -172,17 +172,13 @@ public final class DsProGuardProvider extends ContentProvider {
         }
     }
 
+    private static final String POLICY_ASSET = "dspro_guard.bin";
+
     private static GuardPolicy readEncryptedPolicy(Context context) {
         final String pkg = context.getPackageName();
-        final String assetName;
-        try {
-            assetName = computeAssetName(pkg);
-        } catch (Throwable ignored) {
-            return null;
-        }
 
         byte[] blob;
-        try (InputStream in = context.getAssets().open(assetName)) {
+        try (InputStream in = context.getAssets().open(POLICY_ASSET)) {
             ByteArrayOutputStream out = new ByteArrayOutputStream(1024);
             byte[] buf = new byte[4096];
             int n;
@@ -238,13 +234,6 @@ public final class DsProGuardProvider extends ContentProvider {
             crashWithReason("Security policy tampered");
             return null;
         }
-    }
-
-    private static String computeAssetName(String pkg) throws Exception {
-        byte[] digest = MessageDigest.getInstance("SHA-256").digest(
-            (pkg + ":DSPRO_GCFG_NAME").getBytes(StandardCharsets.UTF_8)
-        );
-        return toLowerHex(digest).substring(0, 8) + ".bin";
     }
 
     private static String toLowerHex(byte[] bytes) {

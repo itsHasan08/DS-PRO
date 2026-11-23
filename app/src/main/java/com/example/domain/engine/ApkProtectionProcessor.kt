@@ -284,18 +284,14 @@ class ApkProtectionProcessor(
     companion object {
         const val GUARD_DEX_ASSET = "ds_pro_guard.dex"
         const val DPT_SHELL_DEX_ASSET = "ds_pro_dpt_shell.dex"
+        const val GUARD_POLICY_ASSET = "assets/dspro_guard.bin"
+        const val DPT_CONTAINER_ASSET = "assets/dspro_dpt.bin"
         private const val GUARD_DESCRIPTOR = "Lcom/dspro/guard/DsProGuardProvider;"
         private const val DPT_DESCRIPTOR = "Lcom/dspro/dpt/DsProShellApplication;"
 
-        fun guardConfigAssetPath(packageName: String): String {
-            val shortHash = sha256Hex("$packageName:DSPRO_GCFG_NAME".toByteArray(Charsets.UTF_8)).substring(0, 8)
-            return "assets/$shortHash.bin"
-        }
+        fun guardConfigAssetPath(packageName: String): String = GUARD_POLICY_ASSET
 
-        fun dptContainerAssetPath(packageName: String): String {
-            val shortHash = sha256Hex("$packageName:DSPRO_DPT_NAME".toByteArray(Charsets.UTF_8)).substring(0, 8)
-            return "assets/$shortHash.bin"
-        }
+        fun dptContainerAssetPath(packageName: String): String = DPT_CONTAINER_ASSET
 
         fun transformApkArchive(
             inputFile: File,
@@ -365,6 +361,7 @@ class ApkProtectionProcessor(
 
                         if (isV1SignatureEntry(name) ||
                             name.startsWith("assets/ds_pro_") ||
+                            name.startsWith("assets/dspro_") ||
                             name == guardAssetName ||
                             name == dptAssetName
                         ) {

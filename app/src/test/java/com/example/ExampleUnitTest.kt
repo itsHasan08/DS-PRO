@@ -610,15 +610,14 @@ class ExampleUnitTest {
                 assertEquals(1, decrypted.size)
                 assertTrue(DexPatcher.isValidDex(decrypted[0]))
 
-                // Only stealth .bin assets added (no ds_pro_* filenames)
+                // Only clean branded encrypted dspro_*.bin assets added
                 val assetNames = zip.entries().asSequence().map { it.name }.filter { it.startsWith("assets/") }.toList()
-                assertFalse(assetNames.any { it.contains("ds_pro") })
                 assertEquals(
                     listOf(
                         "assets/odd_name_1.txt",
                         "assets/model.tflite",
-                        ApkProtectionProcessor.dptContainerAssetPath("com.real.target"),
-                        ApkProtectionProcessor.guardConfigAssetPath("com.real.target"),
+                        "assets/dspro_dpt.bin",
+                        "assets/dspro_guard.bin",
                     ).sorted(),
                     assetNames.sorted(),
                 )
@@ -706,5 +705,34 @@ class ExampleUnitTest {
         assertEquals("512 B", formatBytes(512))
         assertTrue(formatBytes(2048).contains("KB"))
         assertTrue(formatBytes(4 * 1024 * 1024L).contains("MB"))
+    }
+
+    @Test
+    fun `reset ui state clears apk config progress and disables start`() {
+        val activeState = DsProUiState(
+            selectedApkUri = "content://downloads/demo.apk",
+            selectedApk = sampleApk(),
+            config = ProtectionConfig(
+                detectRoot = true,
+                dptDexEncryption = true,
+                disableDebuggable = true,
+                antiTampering = true,
+            ),
+            progress = 100,
+        )
+        assertTrue(activeState.isStartEnabled)
+        assertEquals(4, activeState.config.activeToggleCount)
+
+        val refreshingState = activeState.copy(isRefreshing = true)
+        assertFalse(refreshingState.isStartEnabled)
+
+        val resetState = DsProUiState(statusMessage = "Everything has been reset.")
+        assertEquals(null, resetState.selectedApkUri)
+        assertEquals(null, resetState.selectedApk)
+        assertEquals(0, resetState.config.activeToggleCount)
+        assertEquals(0, resetState.progress)
+        assertTrue(resetState.steps.isEmpty())
+        assertEquals(null, resetState.runResult)
+        assertFalse(resetState.isStartEnabled)
     }
 }

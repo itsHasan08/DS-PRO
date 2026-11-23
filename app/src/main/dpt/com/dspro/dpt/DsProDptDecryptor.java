@@ -84,10 +84,11 @@ final class DsProDptDecryptor {
         initialized = true;
     }
 
+    private static final String CONTAINER_ASSET = "assets/dspro_dpt.bin";
+
     static DecryptedBundle decryptAll(String apkPath, String packageName) {
         try (ZipFile zip = new ZipFile(apkPath)) {
-            String assetName = computeContainerAssetName(packageName);
-            ZipEntry entry = zip.getEntry(assetName);
+            ZipEntry entry = zip.getEntry(CONTAINER_ASSET);
             if (entry == null) {
                 throw new IllegalStateException("Missing encrypted DEX container.");
             }
@@ -184,13 +185,6 @@ final class DsProDptDecryptor {
         } catch (Throwable t) {
             throw new SecurityException("DS PRO DPT classloader attach failed: " + t.getMessage(), t);
         }
-    }
-
-    private static String computeContainerAssetName(String packageName) throws Exception {
-        byte[] digest = MessageDigest.getInstance("SHA-256").digest(
-            (packageName + ":DSPRO_DPT_NAME").getBytes(StandardCharsets.UTF_8)
-        );
-        return "assets/" + toLowerHex(digest).substring(0, 8) + ".bin";
     }
 
     private static String toLowerHex(byte[] bytes) {

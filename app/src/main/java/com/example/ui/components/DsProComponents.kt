@@ -21,9 +21,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -39,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -56,6 +57,7 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.ErrorTint
 import com.example.ui.theme.MonoCodeStyle
 import com.example.ui.theme.ProBlue
+import com.example.ui.theme.ProBlueDark
 import com.example.ui.theme.ProBlueTint
 import com.example.ui.theme.PureWhite
 import com.example.ui.theme.SectionGrey
@@ -66,8 +68,8 @@ import com.example.ui.theme.SuccessTint
 @Composable
 fun DsProTopBar(
     activeCount: Int,
-    isRefreshing: Boolean = false,
-    onRefresh: () -> Unit = {},
+    isResetEnabled: Boolean = true,
+    onReset: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -93,9 +95,13 @@ fun DsProTopBar(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(34.dp)
-                            .clip(RoundedCornerShape(9.dp))
-                            .background(ProBlue),
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                Brush.linearGradient(
+                                    colors = listOf(ProBlue, ProBlueDark),
+                                ),
+                            ),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
@@ -115,25 +121,38 @@ fun DsProTopBar(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     StatusPill(
                         text = "$activeCount Active",
-                        containerColor = ProBlueTint,
-                        contentColor = ProBlue,
+                        containerColor = if (activeCount > 0) SuccessTint else ProBlueTint,
+                        contentColor = if (activeCount > 0) SuccessEmerald else ProBlueDark,
                     )
-                    IconButton(
-                        onClick = onRefresh,
-                        enabled = !isRefreshing,
+                    Surface(
                         modifier = Modifier
                             .size(48.dp)
-                            .testTag("refresh_button"),
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(
+                                enabled = isResetEnabled,
+                                role = Role.Button,
+                                onClick = onReset,
+                            )
+                            .testTag("reset_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isResetEnabled) ProBlueTint else SectionGrey,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isResetEnabled) ProBlue.copy(alpha = 0.35f) else BorderSubtle,
+                        ),
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Refresh,
-                            contentDescription = "Refresh",
-                            tint = if (isRefreshing) SlateMuted else ProBlue,
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.RestartAlt,
+                                contentDescription = "Reset all",
+                                tint = if (isResetEnabled) ProBlueDark else SlateMuted,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -147,6 +166,8 @@ fun SectionCard(
     title: String,
     icon: ImageVector,
     modifier: Modifier = Modifier,
+    accentColor: Color = ProBlue,
+    accentTint: Color = ProBlueTint,
     headerAction: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -154,7 +175,7 @@ fun SectionCard(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         color = SectionGrey,
-        border = BorderStroke(1.dp, BorderSubtle),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.22f)),
     ) {
         Column(
             modifier = Modifier
@@ -171,12 +192,20 @@ fun SectionCard(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        tint = ProBlue,
-                        modifier = Modifier.size(20.dp),
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(accentTint),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            tint = accentColor,
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
@@ -197,6 +226,8 @@ fun GridGroupHeader(
     title: String,
     icon: ImageVector,
     activeCount: Int,
+    accentColor: Color = ProBlue,
+    accentTint: Color = ProBlueTint,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -204,14 +235,22 @@ fun GridGroupHeader(
             .fillMaxWidth()
             .padding(top = 6.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = ProBlue,
-            modifier = Modifier.size(18.dp),
-        )
+        Box(
+            modifier = Modifier
+                .size(24.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .background(accentTint),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = accentColor,
+                modifier = Modifier.size(15.dp),
+            )
+        }
         Text(
             text = title,
             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
@@ -221,13 +260,13 @@ fun GridGroupHeader(
             Box(
                 modifier = Modifier
                     .clip(CircleShape)
-                    .background(ProBlueTint)
-                    .padding(horizontal = 6.dp, vertical = 1.dp),
+                    .background(accentTint)
+                    .padding(horizontal = 7.dp, vertical = 2.dp),
             ) {
                 Text(
                     text = "$activeCount",
                     style = MaterialTheme.typography.labelSmall,
-                    color = ProBlue,
+                    color = accentColor,
                 )
             }
         }
@@ -241,6 +280,8 @@ fun GridToggleTile(
     onCheckedChange: (Boolean) -> Unit,
     onInfoClick: () -> Unit,
     testTag: String,
+    accentColor: Color = ProBlue,
+    accentTint: Color = ProBlueTint,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -249,8 +290,8 @@ fun GridToggleTile(
             .clickable(role = Role.Switch) { onCheckedChange(!checked) }
             .testTag(testTag),
         shape = RoundedCornerShape(12.dp),
-        color = if (checked) ProBlueTint.copy(alpha = 0.5f) else PureWhite,
-        border = BorderStroke(1.dp, if (checked) ProBlue.copy(alpha = 0.45f) else BorderSubtle),
+        color = if (checked) accentTint.copy(alpha = 0.7f) else PureWhite,
+        border = BorderStroke(1.dp, if (checked) accentColor.copy(alpha = 0.5f) else BorderSubtle),
     ) {
         Row(
             modifier = Modifier
@@ -278,7 +319,7 @@ fun GridToggleTile(
                 Icon(
                     imageVector = Icons.Outlined.Info,
                     contentDescription = "$title info",
-                    tint = if (checked) ProBlue else SlateMuted,
+                    tint = if (checked) accentColor else SlateMuted,
                     modifier = Modifier.size(18.dp),
                 )
             }
@@ -292,7 +333,7 @@ fun GridToggleTile(
                     modifier = Modifier.scale(0.76f),
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = PureWhite,
-                        checkedTrackColor = ProBlue,
+                        checkedTrackColor = accentColor,
                         uncheckedThumbColor = PureWhite,
                         uncheckedTrackColor = BorderSubtle,
                         uncheckedBorderColor = SlateMuted.copy(alpha = 0.4f),
@@ -350,14 +391,14 @@ fun FeatureInfoDialog(
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
-                    color = ProBlueTint.copy(alpha = 0.45f),
+                    color = ProBlueTint.copy(alpha = 0.5f),
                     border = BorderStroke(1.dp, ProBlue.copy(alpha = 0.25f)),
                 ) {
                     Column(modifier = Modifier.padding(10.dp)) {
                         Text(
                             text = "What Turns ON",
                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = ProBlue,
+                            color = ProBlueDark,
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
@@ -405,17 +446,31 @@ fun StatusPill(
     text: String,
     containerColor: Color,
     contentColor: Color,
+    icon: ImageVector? = null,
 ) {
     Surface(
         shape = RoundedCornerShape(50),
         color = containerColor,
     ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall,
-            color = contentColor,
+        Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-        )
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = contentColor,
+                    modifier = Modifier.size(13.dp),
+                )
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                color = contentColor,
+            )
+        }
     }
 }
 

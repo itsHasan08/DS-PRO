@@ -33,9 +33,12 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +48,9 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.Indicator
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -77,10 +83,13 @@ import com.example.ui.theme.MonoCodeStyle
 import com.example.ui.theme.ProBlue
 import com.example.ui.theme.ProBlueTint
 import com.example.ui.theme.PureWhite
-import com.example.ui.theme.SectionGrey
 import com.example.ui.theme.SlateMuted
 import com.example.ui.theme.SuccessEmerald
 import com.example.ui.theme.SuccessTint
+import com.example.ui.theme.TealAccent
+import com.example.ui.theme.TealTint
+import com.example.ui.theme.WarningAmber
+import com.example.ui.theme.WarningTint
 import com.example.ui.viewmodel.MainViewModel
 
 private data class ToggleSpec(
@@ -90,7 +99,7 @@ private data class ToggleSpec(
     val onToggle: (Boolean) -> Unit,
 )
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     viewModel: MainViewModel,
@@ -98,6 +107,7 @@ fun MainScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var activeInfoDialog by remember { mutableStateOf<Pair<ProtectionFeatureInfo, Boolean>?>(null) }
+    val pullToRefreshState = rememberPullToRefreshState()
 
     val apkPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -142,304 +152,331 @@ fun MainScreen(
         topBar = {
             DsProTopBar(
                 activeCount = cfg.activeToggleCount,
-                isRefreshing = uiState.isLoadingApk || uiState.isProcessing,
-                onRefresh = { viewModel.refreshWorkspace() },
+                isResetEnabled = !uiState.isProcessing && !uiState.isLoadingApk,
+                onReset = { viewModel.resetAll() },
             )
         },
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
     ) { innerPadding ->
-        Box(
+        PullToRefreshBox(
+            isRefreshing = uiState.isRefreshing,
+            onRefresh = { viewModel.refreshWorkspace() },
+            state = pullToRefreshState,
+            indicator = {
+                Indicator(
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    isRefreshing = uiState.isRefreshing,
+                    containerColor = PureWhite,
+                    color = ProBlue,
+                    state = pullToRefreshState,
+                )
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
-            contentAlignment = Alignment.TopCenter,
         ) {
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 156.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .widthIn(max = 840.dp),
-                contentPadding = PaddingValues(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.TopCenter,
             ) {
-                // 1. Select APK + Metadata + Protection Status (Full Span)
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    SectionCard(
-                        title = "APK File",
-                        icon = Icons.Filled.FolderOpen,
-                    ) {
-                        Button(
-                            onClick = {
-                                apkPickerLauncher.launch(
-                                    arrayOf(
-                                        "application/vnd.android.package-archive",
-                                        "application/octet-stream",
-                                        "*/*",
-                                    ),
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 48.dp)
-                                .testTag("select_apk_button"),
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = ProBlue,
-                                contentColor = PureWhite,
-                            ),
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 156.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .widthIn(max = 840.dp),
+                    contentPadding = PaddingValues(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    // 1. Select APK + Metadata + Protection Badge (Full Span)
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        SectionCard(
+                            title = "APK File",
+                            icon = Icons.Filled.FolderOpen,
+                            accentColor = ProBlue,
+                            accentTint = ProBlueTint,
                         ) {
-                            Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (uiState.selectedApk == null) "Select APK" else "Change APK",
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-
-                        if (uiState.isLoadingApk) {
-                            Row(
+                            Button(
+                                onClick = {
+                                    apkPickerLauncher.launch(
+                                        arrayOf(
+                                            "application/vnd.android.package-archive",
+                                            "application/octet-stream",
+                                            "*/*",
+                                        ),
+                                    )
+                                },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    strokeWidth = 2.dp,
-                                    color = ProBlue,
-                                )
-                                Text(
-                                    text = "Reading APK...",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = CharcoalText,
-                                )
-                            }
-                        }
-
-                        if (uiState.apkError != null) {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(10.dp),
-                                color = ErrorTint,
-                                border = BorderStroke(1.dp, ErrorRed.copy(alpha = 0.35f)),
-                            ) {
-                                Text(
-                                    text = uiState.apkError!!,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = ErrorRed,
-                                    modifier = Modifier.padding(10.dp),
-                                )
-                            }
-                        }
-
-                        val apk = uiState.selectedApk
-                        if (apk != null) {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
+                                    .heightIn(min = 48.dp)
+                                    .testTag("select_apk_button"),
                                 shape = RoundedCornerShape(12.dp),
-                                color = PureWhite,
-                                border = BorderStroke(1.dp, BorderSubtle),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ProBlue,
+                                    contentColor = PureWhite,
+                                ),
                             ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (uiState.selectedApk == null) "Select APK" else "Change APK",
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+
+                            if (uiState.isLoadingApk) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 ) {
-                                    KeyValueLine("App Name", apk.appName)
-                                    KeyValueLine("Package", apk.packageName, mono = true)
-                                    KeyValueLine("Version", "${apk.versionName} (${apk.versionCode})")
-                                    KeyValueLine("Size", "${formatBytes(apk.fileSizeBytes)} (${apk.dexCount} DEX)")
-                                    Spacer(modifier = Modifier.size(2.dp))
-                                    FlowRow(
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp,
+                                        color = ProBlue,
+                                    )
+                                    Text(
+                                        text = "Reading APK...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CharcoalText,
+                                    )
+                                }
+                            }
+
+                            if (uiState.apkError != null) {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ErrorTint,
+                                    border = BorderStroke(1.dp, ErrorRed.copy(alpha = 0.35f)),
+                                ) {
+                                    Text(
+                                        text = uiState.apkError!!,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = ErrorRed,
+                                        modifier = Modifier.padding(10.dp),
+                                    )
+                                }
+                            }
+
+                            val apk = uiState.selectedApk
+                            if (apk != null) {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = PureWhite,
+                                    border = BorderStroke(1.dp, BorderSubtle),
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
-                                        val isProtected = apk.hasDptShell || apk.hasGuardProvider
-                                        StatusPill(
-                                            text = when {
-                                                apk.hasDptShell && apk.hasGuardProvider -> "DS PRO DPT + Guard"
-                                                apk.hasDptShell -> "DS PRO DPT Shell"
-                                                apk.hasGuardProvider -> "DS PRO Guard"
-                                                else -> "Unprotected"
-                                            },
-                                            containerColor = if (isProtected) SuccessTint else SectionGrey,
-                                            contentColor = if (isProtected) SuccessEmerald else SlateMuted,
-                                        )
-                                        StatusPill(
-                                            text = if (apk.isSigned) "Signed" else "Unsigned",
-                                            containerColor = if (apk.isSigned) ProBlueTint else ErrorTint,
-                                            contentColor = if (apk.isSigned) ProBlue else ErrorRed,
-                                        )
-                                        StatusPill(
-                                            text = if (apk.isDebuggable) "Debuggable" else "Non-Debuggable",
-                                            containerColor = if (apk.isDebuggable) ErrorTint else SuccessTint,
-                                            contentColor = if (apk.isDebuggable) ErrorRed else SuccessEmerald,
-                                        )
+                                        KeyValueLine("App Name", apk.appName)
+                                        KeyValueLine("Package", apk.packageName, mono = true)
+                                        KeyValueLine("Version", "${apk.versionName} (${apk.versionCode})")
+                                        KeyValueLine("Size", "${formatBytes(apk.fileSizeBytes)} (${apk.dexCount} DEX)")
+                                        Spacer(modifier = Modifier.size(2.dp))
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            val isProtected = apk.hasDptShell || apk.hasGuardProvider
+                                            StatusPill(
+                                                text = when {
+                                                    apk.hasDptShell && apk.hasGuardProvider -> "DS PRO DPT + Guard"
+                                                    apk.hasDptShell -> "DS PRO DPT Shell"
+                                                    apk.hasGuardProvider -> "DS PRO Guard"
+                                                    else -> "Unprotected"
+                                                },
+                                                containerColor = if (isProtected) SuccessTint else WarningTint,
+                                                contentColor = if (isProtected) SuccessEmerald else WarningAmber,
+                                                icon = if (isProtected) Icons.Filled.VerifiedUser else Icons.Outlined.Shield,
+                                            )
+                                            StatusPill(
+                                                text = if (apk.isSigned) "Signed" else "Unsigned",
+                                                containerColor = if (apk.isSigned) ProBlueTint else ErrorTint,
+                                                contentColor = if (apk.isSigned) ProBlue else ErrorRed,
+                                            )
+                                            StatusPill(
+                                                text = if (apk.isDebuggable) "Debuggable" else "Non-Debuggable",
+                                                containerColor = if (apk.isDebuggable) ErrorTint else TealTint,
+                                                contentColor = if (apk.isDebuggable) ErrorRed else TealAccent,
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                // 2. Runtime Guard Group (Injected DEX Provider)
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    GridGroupHeader(
-                        title = ProtectionSection.RUNTIME_GUARD.label,
-                        icon = Icons.Filled.Security,
-                        activeCount = cfg.activeCountFor(ProtectionSection.RUNTIME_GUARD),
-                    )
-                }
-                items(
-                    items = runtimeGuardToggles(cfg, viewModel),
-                    key = { it.tag },
-                ) { item ->
-                    GridToggleTile(
-                        title = item.info.title,
-                        checked = item.checked,
-                        onCheckedChange = item.onToggle,
-                        onInfoClick = { activeInfoDialog = item.info to item.checked },
-                        testTag = item.tag,
-                    )
-                }
+                    // 2. Runtime Guard Group (2-column compact grid with ProBlue accent)
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        GridGroupHeader(
+                            title = ProtectionSection.RUNTIME_GUARD.label,
+                            icon = Icons.Filled.Security,
+                            activeCount = cfg.activeCountFor(ProtectionSection.RUNTIME_GUARD),
+                            accentColor = ProBlue,
+                            accentTint = ProBlueTint,
+                        )
+                    }
+                    items(
+                        items = runtimeGuardToggles(cfg, viewModel),
+                        key = { it.tag },
+                    ) { item ->
+                        GridToggleTile(
+                            title = item.info.title,
+                            checked = item.checked,
+                            onCheckedChange = item.onToggle,
+                            onInfoClick = { activeInfoDialog = item.info to item.checked },
+                            testTag = item.tag,
+                            accentColor = ProBlue,
+                            accentTint = ProBlueTint,
+                        )
+                    }
 
-                // 3. Binary & Manifest Hardening Group
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    GridGroupHeader(
-                        title = ProtectionSection.BINARY_HARDENING.label,
-                        icon = Icons.Filled.Build,
-                        activeCount = cfg.activeCountFor(ProtectionSection.BINARY_HARDENING),
-                    )
-                }
-                items(
-                    items = binaryHardeningToggles(cfg, viewModel),
-                    key = { it.tag },
-                ) { item ->
-                    GridToggleTile(
-                        title = item.info.title,
-                        checked = item.checked,
-                        onCheckedChange = item.onToggle,
-                        onInfoClick = { activeInfoDialog = item.info to item.checked },
-                        testTag = item.tag,
-                    )
-                }
+                    // 3. Binary & Manifest Hardening Group (2-column compact grid with TealAccent)
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        GridGroupHeader(
+                            title = ProtectionSection.BINARY_HARDENING.label,
+                            icon = Icons.Filled.Build,
+                            activeCount = cfg.activeCountFor(ProtectionSection.BINARY_HARDENING),
+                            accentColor = TealAccent,
+                            accentTint = TealTint,
+                        )
+                    }
+                    items(
+                        items = binaryHardeningToggles(cfg, viewModel),
+                        key = { it.tag },
+                    ) { item ->
+                        GridToggleTile(
+                            title = item.info.title,
+                            checked = item.checked,
+                            onCheckedChange = item.onToggle,
+                            onInfoClick = { activeInfoDialog = item.info to item.checked },
+                            testTag = item.tag,
+                            accentColor = TealAccent,
+                            accentTint = TealTint,
+                        )
+                    }
 
-                // 4. Start + Progress + DS_PRO_Protected Folder Output (Full Span)
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        if (cfg.signaturePinning) {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(10.dp),
-                                color = ErrorTint,
-                                border = BorderStroke(1.dp, ErrorRed.copy(alpha = 0.35f)),
-                            ) {
-                                Text(
-                                    text = "Signature Pinning is ON: re-sign the output APK with the original signing certificate, otherwise the app will exit on launch.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = ErrorRed,
-                                    modifier = Modifier.padding(10.dp),
-                                )
-                            }
-                        }
-
-                        Button(
-                            onClick = { viewModel.startProtection() },
-                            enabled = uiState.isStartEnabled,
+                    // 4. Start + Progress + DS_PRO_Protected Folder Output (Full Span)
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(min = 52.dp)
-                                .testTag("start_protection_button"),
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = ProBlue,
-                                contentColor = PureWhite,
-                            ),
+                                .padding(top = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (uiState.isProcessing) "Processing (${uiState.progress}%)..." else "Start",
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-
-                        if (uiState.isProcessing || uiState.progress > 0) {
-                            LinearProgressIndicator(
-                                progress = { uiState.progress / 100f },
-                                modifier = Modifier.fillMaxWidth(),
-                                color = ProBlue,
-                                trackColor = BorderSubtle,
-                            )
-                        }
-
-                        uiState.steps.forEach { step ->
-                            StepResultRow(
-                                title = step.title,
-                                detail = step.detail,
-                                status = step.status,
-                            )
-                        }
-
-                        val runResult = uiState.runResult
-                        if (runResult != null && runResult.isValidBuild) {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                color = SuccessTint,
-                                border = BorderStroke(1.dp, SuccessEmerald.copy(alpha = 0.4f)),
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                            if (cfg.signaturePinning) {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ErrorTint,
+                                    border = BorderStroke(1.dp, ErrorRed.copy(alpha = 0.35f)),
                                 ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Filled.Folder,
-                                            contentDescription = null,
-                                            tint = SuccessEmerald,
-                                            modifier = Modifier.size(18.dp),
-                                        )
-                                        Text(
-                                            text = "Protected APK Saved (${formatBytes(runResult.outputSizeBytes)})",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = CharcoalText,
-                                        )
-                                    }
-                                    runResult.savedLocation?.let { loc ->
-                                        Text(
-                                            text = "${loc.folderDisplay}/${loc.fileName}",
-                                            style = MonoCodeStyle,
-                                            color = SlateMuted,
-                                        )
-                                    }
+                                    Text(
+                                        text = "Signature Pinning is ON: re-sign the output APK with the original signing certificate, otherwise the app will exit on launch.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = ErrorRed,
+                                        modifier = Modifier.padding(10.dp),
+                                    )
                                 }
                             }
 
-                            OutlinedButton(
-                                onClick = {
-                                    val pkg = uiState.selectedApk?.packageName ?: "app"
-                                    exportLauncher.launch("${pkg}_dspro_unsigned.apk")
-                                },
+                            Button(
+                                onClick = { viewModel.startProtection() },
+                                enabled = uiState.isStartEnabled,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(min = 48.dp)
-                                    .testTag("export_apk_button"),
+                                    .heightIn(min = 52.dp)
+                                    .testTag("start_protection_button"),
                                 shape = RoundedCornerShape(12.dp),
-                                border = BorderStroke(1.dp, ProBlue),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ProBlue,
+                                    contentColor = PureWhite,
+                                ),
                             ) {
-                                Icon(Icons.Filled.Download, contentDescription = null, tint = ProBlue, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Save Copy As...", color = ProBlue, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = if (uiState.isProcessing) "Processing (${uiState.progress}%)..." else "Start",
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+
+                            if (uiState.isProcessing || uiState.progress > 0) {
+                                LinearProgressIndicator(
+                                    progress = { uiState.progress / 100f },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = ProBlue,
+                                    trackColor = BorderSubtle,
+                                )
+                            }
+
+                            uiState.steps.forEach { step ->
+                                StepResultRow(
+                                    title = step.title,
+                                    detail = step.detail,
+                                    status = step.status,
+                                )
+                            }
+
+                            val runResult = uiState.runResult
+                            if (runResult != null && runResult.isValidBuild) {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = SuccessTint,
+                                    border = BorderStroke(1.dp, SuccessEmerald.copy(alpha = 0.4f)),
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Folder,
+                                                contentDescription = null,
+                                                tint = SuccessEmerald,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                            Text(
+                                                text = "Protected APK Saved (${formatBytes(runResult.outputSizeBytes)})",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = CharcoalText,
+                                            )
+                                        }
+                                        runResult.savedLocation?.let { loc ->
+                                            Text(
+                                                text = "${loc.folderDisplay}/${loc.fileName}",
+                                                style = MonoCodeStyle,
+                                                color = SlateMuted,
+                                            )
+                                        }
+                                    }
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        val pkg = uiState.selectedApk?.packageName ?: "app"
+                                        exportLauncher.launch("${pkg}_dspro_unsigned.apk")
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 48.dp)
+                                        .testTag("export_apk_button"),
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, TealAccent),
+                                ) {
+                                    Icon(Icons.Filled.Download, contentDescription = null, tint = TealAccent, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Save Copy As...", color = TealAccent, fontWeight = FontWeight.SemiBold)
+                                }
                             }
                         }
                     }
@@ -454,8 +491,8 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
         info = ProtectionFeatureInfo(
             id = "detect_root",
             title = "Detect Root",
-            whatTurnsOn = "Activates Root Environment Guard inside the encrypted runtime policy and injects DsProGuardProvider.",
-            howItWorks = "Scans for su binaries, Magisk/KernelSU/APatch mounts, and test-keys ROM builds before the app starts. If root is detected, the app immediately crashes with the reason 'Root detected'.",
+            whatTurnsOn = "Activates Root Environment Guard inside encrypted assets/dspro_guard.bin and injects DsProGuardProvider.",
+            howItWorks = "Scans for su binaries, Magisk/KernelSU/APatch mounts, and test-keys ROM builds before the app starts. If root is detected, the app immediately crashes with 'Root detected'.",
         ),
         checked = cfg.detectRoot,
         tag = "switch_detect_root",
@@ -465,7 +502,7 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
         info = ProtectionFeatureInfo(
             id = "detect_emulator",
             title = "Detect Emulator",
-            whatTurnsOn = "Activates Emulator & Virtual Device Guard inside the encrypted runtime policy.",
+            whatTurnsOn = "Activates Emulator & Virtual Device Guard inside encrypted assets/dspro_guard.bin.",
             howItWorks = "Inspects system build properties (fingerprint, model, goldfish/ranchu/vbox/nox hardware) and QEMU sockets. Stops execution with 'Emulator detected' on virtual devices.",
         ),
         checked = cfg.detectEmulator,
@@ -477,7 +514,7 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
             id = "detect_vpn",
             title = "Detect VPN",
             whatTurnsOn = "Activates VPN Tunnel Monitor at launch and on every Activity resume.",
-            howItWorks = "Checks Android VPN network transports and active tun/ppp/wg/pptp interfaces. If a VPN connection is active, the app terminates with 'VPN detected'.",
+            howItWorks = "Checks Android VPN network transports and active tun/ppp/wg/pptp interfaces. If a VPN connection is active, the app crashes with 'VPN detected'.",
         ),
         checked = cfg.detectVpn,
         tag = "switch_detect_vpn",
@@ -488,7 +525,7 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
             id = "detect_xposed",
             title = "Detect Xposed / Frida",
             whatTurnsOn = "Activates Anti-Hooking Guard against Xposed, LSPosed, EdXposed, Substrate, and Frida.",
-            howItWorks = "Inspects loaded classes, stack frames, and /proc/self/maps for hooking modules or Frida gadgets. If found, stops immediately with 'Xposed / Frida hooking detected'.",
+            howItWorks = "Inspects loaded classes, call stacks, and /proc/self/maps for hooking modules or Frida gadgets. If found, crashes immediately with 'Xposed / Frida hooking detected'.",
         ),
         checked = cfg.detectXposed,
         tag = "switch_detect_xposed",
@@ -520,7 +557,7 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
         info = ProtectionFeatureInfo(
             id = "anti_tampering",
             title = "Anti Tampering",
-            whatTurnsOn = "Records SHA-256 digests of AndroidManifest.xml, resources.arsc, DEX, .so libs, and encrypted payloads inside the encrypted guard policy.",
+            whatTurnsOn = "Records SHA-256 digests of AndroidManifest.xml, resources.arsc, DEX, .so libs, and assets/dspro_dpt.bin inside encrypted assets/dspro_guard.bin.",
             howItWorks = "Verifies every tracked file inside the installed APK on startup. If any file is altered or replaced, the app crashes with 'APK tampering detected'.",
         ),
         checked = cfg.antiTampering,
@@ -531,8 +568,8 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
         info = ProtectionFeatureInfo(
             id = "signature_pinning",
             title = "Signature Pinning",
-            whatTurnsOn = "Pins the input APK's signing certificate SHA-256 hash inside the encrypted guard policy.",
-            howItWorks = "Checks the installed app's signing certificate at runtime. Note: you must re-sign the output APK with the original keystore, otherwise it stops with 'APK signature mismatch'.",
+            whatTurnsOn = "Pins the input APK's signing certificate SHA-256 hash inside encrypted assets/dspro_guard.bin.",
+            howItWorks = "Checks the installed app's signing certificate at runtime. Note: you must re-sign the output APK with the original keystore, otherwise it crashes with 'APK signature mismatch'.",
         ),
         checked = cfg.signaturePinning,
         tag = "switch_signature_pinning",
@@ -545,7 +582,7 @@ private fun binaryHardeningToggles(cfg: ProtectionConfig, vm: MainViewModel) = l
         info = ProtectionFeatureInfo(
             id = "dpt_dex_encryption",
             title = "DPT DEX Encrypt",
-            whatTurnsOn = "Encrypts all original classes*.dex payloads with AES-256-GCM into a single hidden binary container in assets/ and injects the in-memory DPT loader shell.",
+            whatTurnsOn = "Encrypts all original classes*.dex payloads with AES-256-GCM into a single container assets/dspro_dpt.bin and injects the in-memory DPT loader shell.",
             howItWorks = "Replaces classes.dex with DsProAppComponentFactory & DsProShellApplication so static DEX editors only see the loader while original code runs decrypted purely in memory.",
         ),
         checked = cfg.dptDexEncryption,

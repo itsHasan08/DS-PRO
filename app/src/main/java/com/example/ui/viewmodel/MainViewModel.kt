@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 data class DsProUiState(
     val selectedApkUri: String? = null,
     val isLoadingApk: Boolean = false,
+    val isRefreshing: Boolean = false,
     val selectedApk: ApkAnalysisResult? = null,
     val apkError: String? = null,
     val config: ProtectionConfig = ProtectionConfig(),
@@ -37,6 +38,7 @@ data class DsProUiState(
             selectedApk != null &&
             hasActiveProtection &&
             !isLoadingApk &&
+            !isRefreshing &&
             !isProcessing
 }
 
@@ -89,7 +91,7 @@ class MainViewModel(
 
     fun refreshWorkspace() {
         val currentState = _uiState.value
-        if (currentState.isProcessing || currentState.isLoadingApk) return
+        if (currentState.isProcessing || currentState.isLoadingApk || currentState.isRefreshing) return
 
         val uriStr = currentState.selectedApkUri
         if (uriStr == null) {
@@ -109,7 +111,7 @@ class MainViewModel(
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
-                    isLoadingApk = true,
+                    isRefreshing = true,
                     apkError = null,
                     progress = 0,
                     steps = emptyList(),
@@ -120,7 +122,7 @@ class MainViewModel(
                 .onSuccess { result ->
                     _uiState.update {
                         it.copy(
-                            isLoadingApk = false,
+                            isRefreshing = false,
                             selectedApk = result,
                             apkError = null,
                             statusMessage = "Reloaded ${result.fileName}.",
@@ -130,13 +132,20 @@ class MainViewModel(
                 .onFailure { err ->
                     _uiState.update {
                         it.copy(
-                            isLoadingApk = false,
+                            isRefreshing = false,
                             apkError = err.message ?: "Failed to reload APK.",
                             statusMessage = "Reload failed.",
                         )
                     }
                 }
         }
+    }
+
+    fun resetAll() {
+        if (_uiState.value.isProcessing) return
+        _uiState.value = DsProUiState(
+            statusMessage = "Everything has been reset.",
+        )
     }
 
     fun startProtection() {
