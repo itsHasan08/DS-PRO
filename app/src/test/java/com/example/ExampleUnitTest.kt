@@ -450,6 +450,159 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun `output apk preserves 16kb so alignment 4b resource alignment stored assets and kotlin runtime metadata`() {
+        val tempDir = Files.createTempDirectory("dspro_align_test").toFile()
+        try {
+            val inputApk = File(tempDir, "aligned_input.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.real.target", debuggable = true, allowBackup = true)
+            val appDex = buildSyntheticDex(withDebugInfo = true)
+            val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
+            val dptShellDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/dpt/DsProShellApplication;")
+            val arscBytes = ByteArray(123) { 0x42 }
+            val tfliteBytes = ByteArray(77) { 0x33 }
+            val soBytes = ByteArray(256) { 0x7F }
+            val kotlinBuiltinBytes = byteArrayOf(10, 20, 30, 40)
+            val kotlinModuleBytes = byteArrayOf(50, 60, 70)
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                // Put some odd-length deflated entries before resources/libs to guarantee unaligned start offsets
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/odd_name_1.txt"))
+                zip.write("hello-world".toByteArray())
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("resources.arsc").apply {
+                    method = ZipEntry.STORED
+                    size = arscBytes.size.toLong()
+                    compressedSize = arscBytes.size.toLong()
+                    crc = CRC32().apply { update(arscBytes) }.value
+                })
+                zip.write(arscBytes)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/model.tflite").apply {
+                    method = ZipEntry.STORED
+                    size = tfliteBytes.size.toLong()
+                    compressedSize = tfliteBytes.size.toLong()
+                    crc = CRC32().apply { update(tfliteBytes) }.value
+                })
+                zip.write(tfliteBytes)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("lib/arm64-v8a/libnative.so").apply {
+                    method = ZipEntry.STORED
+                    size = soBytes.size.toLong()
+                    compressedSize = soBytes.size.toLong()
+                    crc = CRC32().apply { update(soBytes) }.value
+                })
+                zip.write(soBytes)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("kotlin/kotlin.kotlin_builtins"))
+                zip.write(kotlinBuiltinBytes)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("META-INF/app.kotlin_module"))
+                zip.write(kotlinModuleBytes)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("DebugProbesKt.bin"))
+                zip.write(byteArrayOf(1, 2, 3))
+                zip.closeEntry()
+            }
+
+            val outApk = File(tempDir, "aligned_output.apk")
+            // Deliberately pass unknown.package to verify real package is resolved from binary manifest
+            val analysisWithFallbackPkg = sampleApk(inputApk.absolutePath).copy(packageName = "unknown.package")
+            val config = ProtectionConfig(
+                detectRoot = true,
+                antiTampering = true,
+                dptDexEncryption = true,
+                disableDebuggable = true,
+                disableBackup = true,
+                stripDexDebug = true,
+                stripMetadataBloat = true,
+                bestCompression = true,
+            )
+
+            val stats = ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = outApk,
+                analysis = analysisWithFallbackPkg,
+                config = config,
+                guardDexBytes = guardDex,
+                dptShellDexBytes = dptShellDex,
+            )
+
+            assertEquals(1, stats.strippedBloatCount)
+            val (valid, msg) = ApkProtectionProcessor.verifyOutputApk(outApk)
+            assertTrue(msg, valid)
+
+            val offsets = readLocalEntryDataOffsets(outApk)
+            assertEquals(0L, offsets.getValue("resources.arsc") % 4L)
+            assertEquals(0L, offsets.getValue("assets/model.tflite") % 4L)
+            assertEquals(0L, offsets.getValue("lib/arm64-v8a/libnative.so") % 16384L)
+
+            ZipFile(outApk).use { zip ->
+                assertEquals(ZipEntry.STORED, zip.getEntry("resources.arsc").method)
+                assertEquals(ZipEntry.STORED, zip.getEntry("assets/model.tflite").method)
+                assertEquals(ZipEntry.STORED, zip.getEntry("lib/arm64-v8a/libnative.so").method)
+                assertArrayEquals(kotlinBuiltinBytes, zip.getInputStream(zip.getEntry("kotlin/kotlin.kotlin_builtins")).readBytes())
+                assertArrayEquals(kotlinModuleBytes, zip.getInputStream(zip.getEntry("META-INF/app.kotlin_module")).readBytes())
+                assertTrue(zip.getEntry("DebugProbesKt.bin") == null)
+
+                // Decryption must succeed with com.real.target (not unknown.package)
+                val decrypted = decryptDptPayloads(zip, "com.real.target")
+                assertEquals(1, decrypted.size)
+                assertTrue(DexPatcher.isValidDex(decrypted[0]))
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    private fun readLocalEntryDataOffsets(apkFile: File): Map<String, Long> {
+        val bytes = apkFile.readBytes()
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        // Find End of Central Directory (0x06054b50)
+        var eocdOff = -1
+        for (i in (bytes.size - 22) downTo 0) {
+            if (buf.getInt(i) == 0x06054b50) {
+                eocdOff = i
+                break
+            }
+        }
+        assertTrue("Missing EOCD", eocdOff >= 0)
+        val cdSize = buf.getInt(eocdOff + 12)
+        val cdOffset = buf.getInt(eocdOff + 16)
+        val result = linkedMapOf<String, Long>()
+        var pos = cdOffset
+        while (pos < cdOffset + cdSize) {
+            assertEquals(0x02014b50, buf.getInt(pos))
+            val cdNameLen = buf.getShort(pos + 28).toInt() and 0xFFFF
+            val cdExtraLen = buf.getShort(pos + 30).toInt() and 0xFFFF
+            val cdCommentLen = buf.getShort(pos + 32).toInt() and 0xFFFF
+            val lfhOffset = buf.getInt(pos + 42)
+            val name = String(bytes, pos + 46, cdNameLen, Charsets.UTF_8)
+
+            assertEquals(0x04034b50, buf.getInt(lfhOffset))
+            val lfhNameLen = buf.getShort(lfhOffset + 26).toInt() and 0xFFFF
+            val lfhExtraLen = buf.getShort(lfhOffset + 28).toInt() and 0xFFFF
+            result[name] = lfhOffset.toLong() + 30L + lfhNameLen + lfhExtraLen
+
+            pos += 46 + cdNameLen + cdExtraLen + cdCommentLen
+        }
+        return result
+    }
+
+    @Test
     fun `formatBytes renders readable sizes`() {
         assertEquals("512 B", formatBytes(512))
         assertTrue(formatBytes(2048).contains("KB"))

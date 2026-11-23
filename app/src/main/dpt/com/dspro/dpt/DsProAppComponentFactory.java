@@ -21,6 +21,9 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
 
     @Override
     public ClassLoader instantiateClassLoader(ClassLoader cl, ApplicationInfo aInfo) {
+        if (aInfo == null || aInfo.sourceDir == null || aInfo.packageName == null) {
+            return super.instantiateClassLoader(cl, aInfo);
+        }
         if (!DsProDptDecryptor.isInitialized()) {
             DsProDptDecryptor.DecryptedBundle bundle = DsProDptDecryptor.decryptAll(
                 aInfo.sourceDir,
@@ -44,11 +47,26 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
                 } catch (Throwable ignored) {
                 }
             }
-            DsProDptDecryptor.markInitialized(bundle.metadata, memLoader, origFactory);
-            return memLoader;
+            ClassLoader finalLoader = memLoader;
+            if (origFactory != null && Build.VERSION.SDK_INT >= 29) {
+                try {
+                    ClassLoader delegated = origFactory.instantiateClassLoader(memLoader, aInfo);
+                    if (delegated != null) {
+                        finalLoader = delegated;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            DsProDptDecryptor.markInitialized(aInfo.packageName, bundle.metadata, finalLoader, origFactory);
+            return finalLoader;
         }
-        ClassLoader cached = DsProDptDecryptor.getActiveClassLoader();
-        return cached != null ? cached : super.instantiateClassLoader(cl, aInfo);
+        if (DsProDptDecryptor.isInitializedFor(aInfo.packageName)) {
+            ClassLoader cached = DsProDptDecryptor.getActiveClassLoader();
+            if (cached != null) {
+                return cached;
+            }
+        }
+        return super.instantiateClassLoader(cl, aInfo);
     }
 
     private static String buildLibrarySearchPath(ApplicationInfo aInfo) {
@@ -86,7 +104,7 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
                 ? Application.class.getName()
                 : meta.originalAppClass;
         }
-        AppComponentFactory delegate = DsProDptDecryptor.getDelegateFactory();
+        AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
             return delegate.instantiateApplication(loader, targetClass);
         }
@@ -97,7 +115,7 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     public Activity instantiateActivity(ClassLoader cl, String className, Intent intent)
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
         ClassLoader loader = activeLoader(cl);
-        AppComponentFactory delegate = DsProDptDecryptor.getDelegateFactory();
+        AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
             return delegate.instantiateActivity(loader, className, intent);
         }
@@ -108,7 +126,7 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     public BroadcastReceiver instantiateReceiver(ClassLoader cl, String className, Intent intent)
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
         ClassLoader loader = activeLoader(cl);
-        AppComponentFactory delegate = DsProDptDecryptor.getDelegateFactory();
+        AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
             return delegate.instantiateReceiver(loader, className, intent);
         }
@@ -119,7 +137,7 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     public Service instantiateService(ClassLoader cl, String className, Intent intent)
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
         ClassLoader loader = activeLoader(cl);
-        AppComponentFactory delegate = DsProDptDecryptor.getDelegateFactory();
+        AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
             return delegate.instantiateService(loader, className, intent);
         }
@@ -130,11 +148,16 @@ public final class DsProAppComponentFactory extends AppComponentFactory {
     public ContentProvider instantiateProvider(ClassLoader cl, String className)
         throws InstantiationException, IllegalAccessException, ClassNotFoundException {
         ClassLoader loader = activeLoader(cl);
-        AppComponentFactory delegate = DsProDptDecryptor.getDelegateFactory();
+        AppComponentFactory delegate = delegateFactory();
         if (delegate != null) {
             return delegate.instantiateProvider(loader, className);
         }
         return super.instantiateProvider(loader, className);
+    }
+
+    private static AppComponentFactory delegateFactory() {
+        Object raw = DsProDptDecryptor.getDelegateFactory();
+        return (raw instanceof AppComponentFactory) ? (AppComponentFactory) raw : null;
     }
 
     private static ClassLoader activeLoader(ClassLoader fallback) {

@@ -20,6 +20,7 @@ data class AxmlPatchResult(
     val dptShellInjected: Boolean = false,
     val originalAppClass: String = "",
     val originalFactoryClass: String = "",
+    val manifestPackageName: String = "",
 )
 
 /**
@@ -193,6 +194,10 @@ object AxmlManifestPatcher {
         }
     }
 
+    fun resolvePackageName(axmlBytes: ByteArray): String {
+        return runCatching { resolvePackageName(parse(axmlBytes)) }.getOrDefault("")
+    }
+
     fun patch(axmlBytes: ByteArray, options: AxmlPatchOptions): AxmlPatchResult {
         if (!options.disableDebuggable &&
             !options.disableBackup &&
@@ -205,10 +210,12 @@ object AxmlManifestPatcher {
                 backupDisabled = false,
                 guardProviderInjected = false,
                 dptShellInjected = false,
+                manifestPackageName = resolvePackageName(axmlBytes),
             )
         }
 
         val doc = parse(axmlBytes)
+        val manifestPkg = resolvePackageName(doc).ifBlank { options.packageName }
 
         val appIdx = doc.chunks.indexOfFirst { chunk ->
             chunk is XmlChunk.StartElement && doc.strings.getOrNull(chunk.nameIdx) == "application"
@@ -225,23 +232,22 @@ object AxmlManifestPatcher {
 
         if (options.disableDebuggable) {
             val attrNameIdx = doc.ensureResourceAttrString("debuggable", ATTR_DEBUGGABLE)
-            val androidNsIdx = findAndroidNsIndex(doc) ?: doc.ensurePlainString(ANDROID_NS)
+            val androidNsIdx = ensureAndroidNsIndex(doc)
             setOrInsertBooleanAttr(doc, appElem, androidNsIdx, attrNameIdx, ATTR_DEBUGGABLE, false)
             debuggableDisabled = true
         }
 
         if (options.disableBackup) {
             val attrNameIdx = doc.ensureResourceAttrString("allowBackup", ATTR_ALLOW_BACKUP)
-            val androidNsIdx = findAndroidNsIndex(doc) ?: doc.ensurePlainString(ANDROID_NS)
+            val androidNsIdx = ensureAndroidNsIndex(doc)
             setOrInsertBooleanAttr(doc, appElem, androidNsIdx, attrNameIdx, ATTR_ALLOW_BACKUP, false)
             backupDisabled = true
         }
 
         if (options.enableDptShell) {
-            val manifestPkg = options.packageName.ifBlank { resolvePackageName(doc) }
             val nameAttrIdx = doc.ensureResourceAttrString("name", ATTR_NAME)
             val factoryAttrIdx = doc.ensureResourceAttrString("appComponentFactory", ATTR_APP_COMPONENT_FACTORY)
-            val androidNsIdx = findAndroidNsIndex(doc) ?: doc.ensurePlainString(ANDROID_NS)
+            val androidNsIdx = ensureAndroidNsIndex(doc)
             val shellAppValIdx = doc.ensurePlainString(DPT_SHELL_APP_CLASS)
             val shellFactoryValIdx = doc.ensurePlainString(DPT_SHELL_FACTORY_CLASS)
 
@@ -273,13 +279,13 @@ object AxmlManifestPatcher {
             }
 
             if (!alreadyHasProvider) {
-                val pkg = options.packageName.ifBlank { resolvePackageName(doc) }.ifBlank { "app" }
+                val pkg = manifestPkg.ifBlank { "app" }
                 val nameAttrIdx = doc.ensureResourceAttrString("name", ATTR_NAME)
                 val exportedAttrIdx = doc.ensureResourceAttrString("exported", ATTR_EXPORTED)
                 val authoritiesAttrIdx = doc.ensureResourceAttrString("authorities", ATTR_AUTHORITIES)
                 val initOrderAttrIdx = doc.ensureResourceAttrString("initOrder", ATTR_INIT_ORDER)
 
-                val androidNsIdx = findAndroidNsIndex(doc) ?: doc.ensurePlainString(ANDROID_NS)
+                val androidNsIdx = ensureAndroidNsIndex(doc)
                 val providerTagIdx = doc.ensurePlainString("provider")
                 val classValIdx = doc.ensurePlainString(GUARD_PROVIDER_CLASS)
                 val authorityValIdx = doc.ensurePlainString("$pkg.dspro.guard")
@@ -346,6 +352,8 @@ object AxmlManifestPatcher {
             guardProviderInjected = true
         }
 
+        // Re-locate <application> index in case StartNamespace was inserted before it
+        val resolvedAppIdx = doc.chunks.indexOf(appElem)
         return AxmlPatchResult(
             manifestBytes = encode(doc),
             debuggableDisabled = debuggableDisabled,
@@ -354,6 +362,7 @@ object AxmlManifestPatcher {
             dptShellInjected = dptShellInjected,
             originalAppClass = originalAppClass,
             originalFactoryClass = originalFactoryClass,
+            manifestPackageName = manifestPkg,
         )
     }
 
@@ -453,13 +462,37 @@ object AxmlManifestPatcher {
         return if (pkgAttr.dataType == TYPE_STRING) doc.strings.getOrNull(pkgAttr.data).orEmpty() else ""
     }
 
-    private fun findAndroidNsIndex(doc: ParsedAxml): Int? {
+    private fun ensureAndroidNsIndex(doc: ParsedAxml): Int {
         doc.chunks.filterIsInstance<XmlChunk.StartNamespace>().forEach { ns ->
             if (doc.strings.getOrNull(ns.uriIdx) == ANDROID_NS) {
                 return ns.uriIdx
             }
         }
-        return doc.strings.indexOfFirst { it == ANDROID_NS }.takeIf { it >= 0 }
+        val prefixIdx = doc.ensurePlainString("android")
+        val uriIdx = doc.ensurePlainString(ANDROID_NS)
+        val manifestStartIdx = doc.chunks.indexOfFirst {
+            it is XmlChunk.StartElement && doc.strings.getOrNull(it.nameIdx) == "manifest"
+        }.coerceAtLeast(0)
+        val manifestEndIdx = doc.chunks.indexOfLast {
+            it is XmlChunk.EndElement && doc.strings.getOrNull(it.nameIdx) == "manifest"
+        }
+        val startLine = (doc.chunks.getOrNull(manifestStartIdx) as? XmlChunk.StartElement)?.lineNumber ?: 1
+        val endLine = (doc.chunks.getOrNull(manifestEndIdx) as? XmlChunk.EndElement)?.lineNumber ?: startLine
+        doc.chunks.add(
+            manifestStartIdx,
+            XmlChunk.StartNamespace(lineNumber = startLine, commentIdx = -1, prefixIdx = prefixIdx, uriIdx = uriIdx),
+        )
+        if (manifestEndIdx >= 0) {
+            doc.chunks.add(
+                manifestEndIdx + 2,
+                XmlChunk.EndNamespace(lineNumber = endLine, commentIdx = -1, prefixIdx = prefixIdx, uriIdx = uriIdx),
+            )
+        } else {
+            doc.chunks.add(
+                XmlChunk.EndNamespace(lineNumber = endLine, commentIdx = -1, prefixIdx = prefixIdx, uriIdx = uriIdx),
+            )
+        }
+        return uriIdx
     }
 
     private fun getStringAttr(

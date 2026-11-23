@@ -283,9 +283,6 @@ public final class DsProGuardProvider extends ContentProvider {
         if (Debug.isDebuggerConnected() || Debug.waitingForDebugger()) {
             return true;
         }
-        if ((context.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-            return true;
-        }
         try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"))) {
             String line;
             while ((line = reader.readLine()) != null) {

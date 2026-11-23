@@ -51,12 +51,17 @@ final class DsProDptDecryptor {
     }
 
     private static volatile boolean initialized = false;
+    private static volatile String initializedPackage = "";
     private static volatile DptMetadata cachedMetadata = null;
     private static volatile ClassLoader activeClassLoader = null;
-    private static volatile AppComponentFactory delegateFactory = null;
+    private static volatile Object delegateFactory = null;
 
     static boolean isInitialized() {
         return initialized;
+    }
+
+    static boolean isInitializedFor(String packageName) {
+        return initialized && packageName != null && packageName.equals(initializedPackage);
     }
 
     static DptMetadata getCachedMetadata() {
@@ -67,15 +72,17 @@ final class DsProDptDecryptor {
         return activeClassLoader;
     }
 
-    static AppComponentFactory getDelegateFactory() {
+    static Object getDelegateFactory() {
         return delegateFactory;
     }
 
     static synchronized void markInitialized(
+        String packageName,
         DptMetadata metadata,
         ClassLoader loader,
-        AppComponentFactory factory
+        Object factory
     ) {
+        initializedPackage = packageName == null ? "" : packageName;
         cachedMetadata = metadata;
         activeClassLoader = loader;
         delegateFactory = factory;
@@ -93,7 +100,10 @@ final class DsProDptDecryptor {
                 if (entry == null) {
                     throw new IllegalStateException("Missing encrypted DEX payload #" + i);
                 }
-                byte[] encrypted = readAllBytes(zip.getInputStream(entry));
+                int expectedSize = entry.getSize() > 0 && entry.getSize() <= Integer.MAX_VALUE
+                    ? (int) entry.getSize()
+                    : 65536;
+                byte[] encrypted = readAllBytes(zip.getInputStream(entry), expectedSize);
                 if (encrypted.length <= 12) {
                     throw new IllegalStateException("Corrupt encrypted DEX payload #" + i);
                 }
@@ -103,6 +113,7 @@ final class DsProDptDecryptor {
                 Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
                 cipher.init(Cipher.DECRYPT_MODE, keySpec, new GCMParameterSpec(128, iv));
                 byte[] plainDex = cipher.doFinal(encrypted, 12, encrypted.length - 12);
+                encrypted = null;
                 buffers[i] = ByteBuffer.wrap(plainDex);
             }
             return new DecryptedBundle(buffers, meta);
@@ -112,30 +123,36 @@ final class DsProDptDecryptor {
     }
 
     /**
-     * API 26-28 fallback: loads decrypted ByteBuffers into an InMemoryDexClassLoader and
+     * API 26-28 fallback: loads decrypted ByteBuffers into InMemoryDexClassLoader and
      * merges its DexPathList.dexElements into the host BaseDexClassLoader.
      */
     static void injectIntoHostClassLoader(ClassLoader hostLoader, ByteBuffer[] dexBuffers) {
         try {
-            ClassLoader memLoader;
-            if (Build.VERSION.SDK_INT >= 27) {
-                memLoader = new InMemoryDexClassLoader(dexBuffers, hostLoader);
-            } else {
-                ClassLoader chain = hostLoader;
-                for (ByteBuffer buf : dexBuffers) {
-                    chain = new InMemoryDexClassLoader(buf, chain);
-                }
-                memLoader = chain;
-            }
-
             Object hostPathList = getField(hostLoader, "pathList");
             Object hostElements = getField(hostPathList, "dexElements");
 
-            Object memPathList = getField(memLoader, "pathList");
-            Object memElements = getField(memPathList, "dexElements");
+            Object newElements;
+            if (Build.VERSION.SDK_INT >= 27) {
+                ClassLoader memLoader = new InMemoryDexClassLoader(dexBuffers, hostLoader);
+                Object memPathList = getField(memLoader, "pathList");
+                newElements = getField(memPathList, "dexElements");
+            } else {
+                Object accumulated = null;
+                for (ByteBuffer buf : dexBuffers) {
+                    ClassLoader memLoader = new InMemoryDexClassLoader(buf, hostLoader);
+                    Object memPathList = getField(memLoader, "pathList");
+                    Object singleElements = getField(memPathList, "dexElements");
+                    accumulated = (accumulated == null)
+                        ? singleElements
+                        : concatArrays(accumulated, singleElements);
+                }
+                newElements = accumulated;
+            }
 
-            Object combined = concatArrays(memElements, hostElements);
-            setField(hostPathList, "dexElements", combined);
+            if (newElements != null) {
+                Object combined = concatArrays(newElements, hostElements);
+                setField(hostPathList, "dexElements", combined);
+            }
         } catch (Throwable t) {
             throw new SecurityException("DS PRO DPT classloader attach failed: " + t.getMessage(), t);
         }
@@ -179,10 +196,10 @@ final class DsProDptDecryptor {
         }
     }
 
-    private static byte[] readAllBytes(InputStream in) throws Exception {
+    private static byte[] readAllBytes(InputStream in, int initialCapacity) throws Exception {
         try (InputStream stream = in) {
-            ByteArrayOutputStream out = new ByteArrayOutputStream(65536);
-            byte[] buf = new byte[16384];
+            ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(1024, initialCapacity));
+            byte[] buf = new byte[32768];
             int n;
             while ((n = stream.read(buf)) != -1) {
                 out.write(buf, 0, n);

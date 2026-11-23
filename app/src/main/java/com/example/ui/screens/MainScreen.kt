@@ -281,6 +281,22 @@ fun MainScreen(
                             .padding(top = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
+                        if (cfg.signaturePinning) {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                                color = ErrorTint,
+                                border = BorderStroke(1.dp, ErrorRed.copy(alpha = 0.35f)),
+                            ) {
+                                Text(
+                                    text = "Signature Pinning is ON: re-sign the output APK with the original signing certificate, otherwise the app will exit on launch.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = ErrorRed,
+                                    modifier = Modifier.padding(10.dp),
+                                )
+                            }
+                        }
+
                         Button(
                             onClick = { viewModel.startProtection() },
                             enabled = uiState.isStartEnabled,

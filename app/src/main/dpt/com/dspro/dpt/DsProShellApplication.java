@@ -1,6 +1,5 @@
 package com.dspro.dpt;
 
-import android.app.AppComponentFactory;
 import android.app.Application;
 import android.content.Context;
 import android.os.Build;
@@ -29,18 +28,18 @@ public class DsProShellApplication extends Application {
             );
             DsProDptDecryptor.injectIntoHostClassLoader(base.getClassLoader(), bundle.dexBuffers);
 
-            AppComponentFactory factory = null;
+            Object factory = null;
             if (Build.VERSION.SDK_INT >= 28 && !bundle.metadata.originalFactoryClass.isEmpty()
-                && !DsProAppComponentFactory.class.getName().equals(bundle.metadata.originalFactoryClass)) {
+                && !"com.dspro.dpt.DsProAppComponentFactory".equals(bundle.metadata.originalFactoryClass)) {
                 try {
-                    factory = (AppComponentFactory) base.getClassLoader()
+                    factory = base.getClassLoader()
                         .loadClass(bundle.metadata.originalFactoryClass)
                         .getDeclaredConstructor()
                         .newInstance();
                 } catch (Throwable ignored) {
                 }
             }
-            DsProDptDecryptor.markInitialized(bundle.metadata, base.getClassLoader(), factory);
+            DsProDptDecryptor.markInitialized(base.getPackageName(), bundle.metadata, base.getClassLoader(), factory);
         }
 
         DsProDptDecryptor.DptMetadata meta = DsProDptDecryptor.getCachedMetadata();
@@ -57,6 +56,7 @@ public class DsProShellApplication extends Application {
                 Method attach = Application.class.getDeclaredMethod("attach", Context.class);
                 attach.setAccessible(true);
                 attach.invoke(realApplication, base);
+                bindRealApplicationToSystem(realApplication);
             } catch (Throwable t) {
                 throw new IllegalStateException("Failed to attach original Application: " + meta.originalAppClass, t);
             }

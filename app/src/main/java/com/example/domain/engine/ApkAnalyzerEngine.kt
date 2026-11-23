@@ -81,7 +81,7 @@ class ApkAnalyzerEngine(private val context: Context) {
             runCatching { pm.getApplicationLabel(it).toString() }.getOrNull()
         }?.takeIf { it.isNotBlank() } ?: displayName.removeSuffix(".apk")
 
-        val packageName = pkgInfo?.packageName ?: "unknown.package"
+        val pmPackageName = pkgInfo?.packageName?.takeIf { it.isNotBlank() }
         val versionName = pkgInfo?.versionName ?: "1.0"
         val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             pkgInfo?.longVersionCode ?: 1L
@@ -95,6 +95,7 @@ class ApkAnalyzerEngine(private val context: Context) {
 
         var totalEntries = 0
         var hasManifest = false
+        var manifestPackageName = ""
         var dexCount = 0
         var logCallMatches = 0
 
@@ -107,7 +108,12 @@ class ApkAnalyzerEngine(private val context: Context) {
                 val name = entry.name
                 if (name == "AndroidManifest.xml") {
                     hasManifest = true
-                } else if (name.startsWith("classes") && name.endsWith(".dex")) {
+                    if (pmPackageName == null) {
+                        manifestPackageName = zip.getInputStream(entry).use { stream ->
+                            AxmlManifestPatcher.resolvePackageName(stream.readBytes())
+                        }
+                    }
+                } else if (name.startsWith("classes") && name.endsWith(".dex") && name.indexOf('/') == -1) {
                     dexCount++
                     zip.getInputStream(entry).use { stream ->
                         val maxScanBytes = 2 * 1024 * 1024
@@ -131,6 +137,8 @@ class ApkAnalyzerEngine(private val context: Context) {
             apkFile.delete()
             "Selected archive does not contain AndroidManifest.xml."
         }
+
+        val packageName = pmPackageName ?: manifestPackageName.ifBlank { "unknown.package" }
 
         return ApkAnalysisResult(
             fileName = displayName,
