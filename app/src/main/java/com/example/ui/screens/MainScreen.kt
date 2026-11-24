@@ -59,9 +59,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -80,17 +77,12 @@ import com.example.ui.components.ProtectionPipelineCard
 import com.example.ui.components.SectionCard
 import com.example.ui.components.StatusPill
 import com.example.ui.theme.BorderSubtle
-import com.example.ui.theme.CanvasFrost
 import com.example.ui.theme.CharcoalText
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.ErrorTint
 import com.example.ui.theme.ProBlue
-import com.example.ui.theme.ProBlueBright
-import com.example.ui.theme.ProBlueDark
 import com.example.ui.theme.ProBlueTint
 import com.example.ui.theme.PureWhite
-import com.example.ui.theme.SectionGrey
-import com.example.ui.theme.SlateMuted
 import com.example.ui.theme.SuccessEmerald
 import com.example.ui.theme.SuccessTint
 import com.example.ui.theme.TealAccent
@@ -177,8 +169,8 @@ fun MainScreen(
         Scaffold(
             modifier = Modifier
                 .fillMaxSize()
-                .background(CanvasFrost),
-            containerColor = CanvasFrost,
+                .background(PureWhite),
+            containerColor = PureWhite,
             contentWindowInsets = WindowInsets.navigationBars,
             topBar = {
                 DsProTopBar(activeCount = cfg.activeToggleCount)
@@ -295,7 +287,7 @@ fun MainScreen(
                                 Surface(
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp),
-                                    color = SectionGrey,
+                                    color = PureWhite,
                                     border = BorderStroke(1.dp, BorderSubtle),
                                 ) {
                                     Column(
@@ -431,46 +423,27 @@ fun MainScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = 52.dp)
-                                    .clip(RoundedCornerShape(12.dp))
                                     .testTag("start_protection_button"),
                                 shape = RoundedCornerShape(12.dp),
-                                contentPadding = PaddingValues(0.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color.Transparent,
+                                    containerColor = ProBlue,
                                     contentColor = PureWhite,
-                                    disabledContainerColor = Color.Transparent,
-                                    disabledContentColor = SlateMuted,
                                 ),
                             ) {
-                                val ctaBrush = when {
-                                    uiState.isProcessing -> Brush.horizontalGradient(listOf(ProBlueDark, ProBlue))
-                                    uiState.isStartEnabled -> Brush.horizontalGradient(listOf(ProBlue, ProBlueBright))
-                                    else -> Brush.horizontalGradient(listOf(BorderSubtle, BorderSubtle))
-                                }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(min = 52.dp)
-                                        .background(ctaBrush)
-                                        .padding(horizontal = 16.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.Center,
-                                ) {
-                                    if (uiState.isProcessing) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(18.dp),
-                                            strokeWidth = 2.dp,
-                                            color = PureWhite,
-                                        )
-                                    } else {
-                                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = if (uiState.isProcessing) "Processing (${uiState.progress}%)..." else "Start",
-                                        fontWeight = FontWeight.SemiBold,
+                                if (uiState.isProcessing) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = PureWhite,
                                     )
+                                } else {
+                                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
                                 }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (uiState.isProcessing) "Processing (${uiState.progress}%)..." else "Start",
+                                    fontWeight = FontWeight.SemiBold,
+                                )
                             }
 
                             if (uiState.isProcessing || uiState.progress > 0 || uiState.steps.isNotEmpty() || uiState.runResult != null) {

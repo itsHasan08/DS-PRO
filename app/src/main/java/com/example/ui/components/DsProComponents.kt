@@ -91,7 +91,6 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.ErrorTint
 import com.example.ui.theme.MonoCodeStyle
 import com.example.ui.theme.ProBlue
-import com.example.ui.theme.ProBlueBright
 import com.example.ui.theme.ProBlueDark
 import com.example.ui.theme.ProBlueTint
 import com.example.ui.theme.PureWhite
@@ -100,7 +99,6 @@ import com.example.ui.theme.SlateMuted
 import com.example.ui.theme.SuccessEmerald
 import com.example.ui.theme.SuccessTint
 import com.example.ui.theme.TealAccent
-import com.example.ui.theme.TealBright
 import com.example.ui.theme.TealTint
 import kotlinx.coroutines.delay
 import java.util.Locale
@@ -137,7 +135,7 @@ fun DsProTopBar(
                             .clip(RoundedCornerShape(10.dp))
                             .background(
                                 Brush.linearGradient(
-                                    colors = listOf(ProBlueBright, ProBlue, ProBlueDark),
+                                    colors = listOf(ProBlue, ProBlueDark),
                                 ),
                             ),
                         contentAlignment = Alignment.Center,
@@ -209,9 +207,8 @@ fun SectionCard(
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        color = PureWhite,
-        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.24f)),
-        shadowElevation = 1.dp,
+        color = SectionGrey,
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.22f)),
     ) {
         Column(
             modifier = Modifier
@@ -326,11 +323,8 @@ fun GridToggleTile(
             .clickable(role = Role.Switch) { onCheckedChange(!checked) }
             .testTag(testTag),
         shape = RoundedCornerShape(12.dp),
-        color = if (checked) accentTint else PureWhite,
-        border = BorderStroke(
-            width = if (checked) 1.5.dp else 1.dp,
-            color = if (checked) accentColor.copy(alpha = 0.65f) else BorderSubtle,
-        ),
+        color = if (checked) accentTint.copy(alpha = 0.7f) else PureWhite,
+        border = BorderStroke(1.dp, if (checked) accentColor.copy(alpha = 0.5f) else BorderSubtle),
     ) {
         Row(
             modifier = Modifier
@@ -405,13 +399,13 @@ fun ProtectionPipelineCard(
     }
     val secondaryAccent = when {
         hasFailure -> ErrorRed
-        isComplete -> TealBright
-        else -> ProBlueBright
+        isComplete -> SuccessEmerald
+        else -> ProBlueDark
     }
-    val bannerBrush = when {
-        hasFailure -> Brush.linearGradient(listOf(ErrorTint, PureWhite))
-        isComplete -> Brush.linearGradient(listOf(SuccessTint, TealTint))
-        else -> Brush.linearGradient(listOf(ProBlueTint, TealTint.copy(alpha = 0.7f)))
+    val bannerBg = when {
+        hasFailure -> ErrorTint
+        isComplete -> SuccessTint
+        else -> ProBlueTint
     }
     val animatedProgress by animateFloatAsState(
         targetValue = (progress.coerceIn(0, 100)) / 100f,
@@ -467,15 +461,15 @@ fun ProtectionPipelineCard(
             .testTag("protection_pipeline_card"),
         shape = RoundedCornerShape(18.dp),
         color = PureWhite,
-        border = BorderStroke(1.2.dp, accentColor.copy(alpha = 0.38f)),
-        shadowElevation = 3.dp,
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f)),
+        shadowElevation = 2.dp,
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             // Top Animated Status Header
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(bannerBrush)
+                    .background(bannerBg)
                     .padding(horizontal = 14.dp, vertical = 14.dp),
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -715,7 +709,7 @@ fun ProtectionPipelineCard(
                             .testTag("export_apk_button"),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isExported) TealAccent else SuccessEmerald,
+                            containerColor = TealAccent,
                             contentColor = PureWhite,
                         ),
                     ) {
