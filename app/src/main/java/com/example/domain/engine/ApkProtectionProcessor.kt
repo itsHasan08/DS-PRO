@@ -30,12 +30,12 @@ import javax.crypto.spec.SecretKeySpec
 
 data class ArchiveTransformStats(
     val debuggableDisabled: Boolean,
-    val backupDisabled: Boolean,
     val guardProviderInjected: Boolean,
     val coreProtectionInjected: Boolean,
     val encryptedDexCount: Int,
     val encryptedStringsCount: Int,
     val encryptedResourceCount: Int,
+    val encryptedAssistCount: Int = 0,
     val cfoTransformedUnits: Int,
     val cfoMethodsScanned: Int,
     val injectedGuardDexName: String?,
@@ -76,23 +76,6 @@ class ApkProtectionProcessor(
                 outputSizeBytes = 0L,
                 isValidBuild = false,
                 summary = "Input APK missing.",
-                steps = steps.toList(),
-            )
-        }
-
-        if (config.signaturePinning && !analysis.isSigned) {
-            steps += ProtectionStepResult(
-                id = "signature",
-                title = "Signature Pinning",
-                status = StepStatus.FAILED,
-                detail = "Cannot pin signature: input APK has no signing certificate.",
-            )
-            onProgress(100, "Signature Pinning requires a signed APK.", steps.toList())
-            return@withContext ProtectionRunResult(
-                outputApkPath = null,
-                outputSizeBytes = 0L,
-                isValidBuild = false,
-                summary = "Input APK is unsigned; Signature Pinning requires a signed APK.",
                 steps = steps.toList(),
             )
         }
@@ -183,11 +166,10 @@ class ApkProtectionProcessor(
             )
         }
 
-        if (config.disableDebuggable || config.disableBackup || config.requiresGuardDex || config.requiresCoreDexContainer || stats.protectionIdentifierEmbedded) {
+        if (config.disableDebuggable || config.requiresGuardDex || config.requiresCoreDexContainer || stats.protectionIdentifierEmbedded) {
             val manifestActions = buildList {
                 if (stats.coreProtectionInjected) add("DS PRO ComponentFactory + Application")
                 if (stats.debuggableDisabled) add("debuggable=false")
-                if (stats.backupDisabled) add("allowBackup=false")
                 if (stats.guardProviderInjected) add("<provider> DsProGuardProvider")
                 if (stats.protectionIdentifierEmbedded) add("Identifier: ${AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE}")
             }
@@ -205,7 +187,6 @@ class ApkProtectionProcessor(
                 if (config.detectDebugger) add("Debugger")
                 if (config.antiScreenshot) add("Anti-Screenshot")
                 if (config.antiTampering) add("Tamper(${stats.integrityCount})")
-                if (config.signaturePinning) add("SigPin (Same Key)")
                 if (config.antiDump) add("Anti-Dump")
                 if (config.dexIntegrityProtection) add("DEX-Integrity(${stats.dexIntegrityCount})")
             }
@@ -214,6 +195,19 @@ class ApkProtectionProcessor(
                 title = "Runtime Guard Injected",
                 status = StepStatus.SUCCESS,
                 detail = "${stats.injectedGuardDexName ?: "classes2.dex"} -> encrypted policy (${guards.joinToString(", ")})",
+            )
+        }
+
+        if (config.assistEncrypt) {
+            steps += ProtectionStepResult(
+                id = "assist_encrypt",
+                title = "Assist Encrypt",
+                status = StepStatus.SUCCESS,
+                detail = if (stats.encryptedAssistCount > 0) {
+                    "${stats.encryptedAssistCount} assist files (XML/ZIP/config/data) encrypted into dspro_res.bin"
+                } else {
+                    "No modifiable files found in assets/ folder; app assets preserved."
+                },
             )
         }
 
@@ -313,8 +307,8 @@ class ApkProtectionProcessor(
             var cfoMethodsScanned = 0
             var encryptedStringsCount = 0
             var encryptedResourceCount = 0
+            var encryptedAssistCount = 0
             var debuggableDisabled = false
-            var backupDisabled = false
             var guardProviderInjected = false
             var coreProtectionInjected = false
             var protectionIdentifierEmbedded = false
@@ -323,7 +317,7 @@ class ApkProtectionProcessor(
             var injectedGuardDexName: String? = null
 
             val collectedDex = mutableListOf<Pair<String, ByteArray>>()
-            val encryptedResourceAssets = mutableListOf<Pair<String, ByteArray>>()
+            val encryptedResourceAssets = mutableListOf<VaultAssetEntry>()
             var manifestBytes: ByteArray? = null
 
             ZipFile(inputFile).use { zipIn ->
@@ -379,7 +373,7 @@ class ApkProtectionProcessor(
                         if (isV1SignatureEntry(name) ||
                             name == "assets/libjiagu.so" ||
                             (replaceGuardArtifacts && name == guardAssetName) ||
-                            (config.resourceEncryption && name == resAssetName)
+                            (config.requiresAssetVault && name == resAssetName)
                         ) {
                             continue
                         }
@@ -410,10 +404,18 @@ class ApkProtectionProcessor(
                             continue
                         }
 
-                        if (config.resourceEncryption && isEncryptableAsset(name, entry)) {
+                        val captureForResource = config.resourceEncryption && isEncryptableAsset(name, entry)
+                        val captureForAssist = config.assistEncrypt && isAssistEncryptableAsset(name)
+                        if (captureForResource || captureForAssist) {
                             val assetData = zipIn.getInputStream(entry).use { it.readBytes() }
-                            encryptedResourceAssets += name to assetData
-                            encryptedResourceCount++
+                            val wasStored = entry.method == ZipEntry.STORED
+                            encryptedResourceAssets += VaultAssetEntry(
+                                name = name,
+                                bytes = assetData,
+                                keepStored = wasStored,
+                            )
+                            if (captureForResource) encryptedResourceCount++
+                            if (captureForAssist) encryptedAssistCount++
                             continue
                         }
 
@@ -467,7 +469,6 @@ class ApkProtectionProcessor(
                     val shouldEmbedIdentifier = config.activeToggleCount > 0
                     val finalManifest = if (
                         config.disableDebuggable ||
-                        config.disableBackup ||
                         config.requiresGuardDex ||
                         config.requiresCoreDexContainer ||
                         shouldEmbedIdentifier
@@ -476,7 +477,6 @@ class ApkProtectionProcessor(
                             axmlBytes = rawManifest,
                             options = AxmlPatchOptions(
                                 disableDebuggable = config.disableDebuggable,
-                                disableBackup = config.disableBackup,
                                 injectGuardProvider = config.requiresGuardDex,
                                 enableCoreProtection = config.requiresCoreDexContainer,
                                 protectionIdentifier = if (shouldEmbedIdentifier) AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE else "",
@@ -484,7 +484,6 @@ class ApkProtectionProcessor(
                             ),
                         )
                         debuggableDisabled = patchResult.debuggableDisabled
-                        backupDisabled = patchResult.backupDisabled
                         guardProviderInjected = patchResult.guardProviderInjected
                         coreProtectionInjected = patchResult.coreProtectionInjected
                         protectionIdentifierEmbedded = patchResult.protectionIdentifierEmbedded
@@ -501,8 +500,8 @@ class ApkProtectionProcessor(
                         }
                     }
 
-                    if (config.resourceEncryption && encryptedResourceAssets.isNotEmpty()) {
-                        onStageProgress?.invoke(63, "Encrypting ${encryptedResourceAssets.size} resource assets...")
+                    if (config.requiresAssetVault && encryptedResourceAssets.isNotEmpty()) {
+                        onStageProgress?.invoke(63, "Encrypting ${encryptedResourceAssets.size} assist & resource assets...")
                         val resVaultBytes = buildEncryptedResourceVault(
                             rng = SecureRandom(),
                             packageName = effectivePackageName,
@@ -619,12 +618,12 @@ class ApkProtectionProcessor(
 
             return ArchiveTransformStats(
                 debuggableDisabled = debuggableDisabled,
-                backupDisabled = backupDisabled,
                 guardProviderInjected = guardProviderInjected,
                 coreProtectionInjected = coreProtectionInjected,
                 encryptedDexCount = if (config.requiresCoreDexContainer) collectedDex.size else 0,
                 encryptedStringsCount = encryptedStringsCount,
                 encryptedResourceCount = encryptedResourceCount,
+                encryptedAssistCount = encryptedAssistCount,
                 cfoTransformedUnits = cfoTransformedUnits,
                 cfoMethodsScanned = cfoMethodsScanned,
                 injectedGuardDexName = injectedGuardDexName,
@@ -637,6 +636,12 @@ class ApkProtectionProcessor(
             )
         }
 
+        private data class VaultAssetEntry(
+            val name: String,
+            val bytes: ByteArray,
+            val keepStored: Boolean,
+        )
+
         private fun buildDexIntegrityLine(entryName: String, dexBytes: ByteArray): String {
             val adler = if (dexBytes.size >= 12) {
                 ByteBuffer.wrap(dexBytes).order(ByteOrder.LITTLE_ENDIAN).getInt(8).toLong() and 0xFFFFFFFFL
@@ -646,10 +651,7 @@ class ApkProtectionProcessor(
             return "${sha256Hex(dexBytes)}|$adler|${dexBytes.size}|$entryName"
         }
 
-        private fun isEncryptableAsset(name: String, entry: ZipEntry): Boolean {
-            if (entry.method == ZipEntry.STORED) return false
-            if (!name.startsWith("assets/")) return false
-            val lower = name.lowercase()
+        private fun isProtectedSystemOrEngineAsset(lower: String): Boolean {
             if (lower.startsWith("assets/dspro_") ||
                 lower.startsWith("assets/ds_pro_") ||
                 lower.startsWith("assets/flutter_assets/") ||
@@ -657,9 +659,9 @@ class ApkProtectionProcessor(
                 lower.startsWith("assets/dexopt/") ||
                 lower.startsWith("assets/webkit/")
             ) {
-                return false
+                return true
             }
-            return !(lower.endsWith(".so") ||
+            return lower.endsWith(".so") ||
                 lower.endsWith(".tflite") ||
                 lower.endsWith(".lite") ||
                 lower.endsWith(".onnx") ||
@@ -667,23 +669,51 @@ class ApkProtectionProcessor(
                 lower.endsWith(".mp4") ||
                 lower.endsWith(".ogg") ||
                 lower.endsWith(".wav") ||
+                lower.endsWith(".m4a") ||
+                lower.endsWith(".aac") ||
+                lower.endsWith(".webm") ||
+                lower.endsWith(".mkv") ||
                 lower.endsWith(".ttf") ||
-                lower.endsWith(".otf"))
+                lower.endsWith(".otf")
+        }
+
+        private fun isEncryptableAsset(name: String, entry: ZipEntry): Boolean {
+            if (entry.method == ZipEntry.STORED) return false
+            if (!name.startsWith("assets/")) return false
+            return !isProtectedSystemOrEngineAsset(name.lowercase())
+        }
+
+        private fun isAssistEncryptableAsset(name: String): Boolean {
+            if (!name.startsWith("assets/")) return false
+            return !isProtectedSystemOrEngineAsset(name.lowercase())
         }
 
         private fun buildEncryptedResourceVault(
             rng: SecureRandom,
             packageName: String,
-            assetEntries: List<Pair<String, ByteArray>>,
+            assetEntries: List<VaultAssetEntry>,
         ): ByteArray {
             val zipOutBytes = ByteArrayOutputStream()
-            ZipOutputStream(zipOutBytes).use { innerZip ->
+            val innerCountingOut = CountingOutputStream(zipOutBytes)
+            val innerWritten = hashSetOf<String>()
+            val vaultPkg = "${packageName.ifBlank { "com.dspro.vault" }}.dspro.resvault"
+            val vaultManifest = AxmlManifestPatcher.buildMinimalManifestForTest(
+                packageName = vaultPkg,
+                debuggable = null,
+                allowBackup = null,
+            )
+            ZipOutputStream(innerCountingOut).use { innerZip ->
                 innerZip.setLevel(Deflater.BEST_COMPRESSION)
-                for ((name, data) in assetEntries) {
-                    val e = ZipEntry(name).apply { method = ZipEntry.DEFLATED }
-                    innerZip.putNextEntry(e)
-                    innerZip.write(data)
-                    innerZip.closeEntry()
+                writeZipBytes(innerCountingOut, innerZip, innerWritten, "AndroidManifest.xml", vaultManifest, keepStored = false)
+                for (asset in assetEntries) {
+                    writeZipBytes(
+                        countingOut = innerCountingOut,
+                        zipOut = innerZip,
+                        written = innerWritten,
+                        name = asset.name,
+                        bytes = asset.bytes,
+                        keepStored = asset.keepStored,
+                    )
                 }
             }
             val plainZip = zipOutBytes.toByteArray()
@@ -877,16 +907,14 @@ class ApkProtectionProcessor(
             if (config.detectDebugger) flags = flags or (1 shl 4)
             if (config.antiScreenshot) flags = flags or (1 shl 5)
             if (config.antiTampering) flags = flags or (1 shl 6)
-            if (config.signaturePinning) flags = flags or (1 shl 7)
             if (config.antiDump) flags = flags or (1 shl 8)
             if (config.dexIntegrityProtection) flags = flags or (1 shl 9)
 
-            val pinnedCert = if (config.signaturePinning && analysis.isSigned) analysis.signingCertSha256 else "UNSIGNED"
             val entries = if (config.antiTampering) integrityEntries else emptyList()
             val dexEntries = if (config.dexIntegrityProtection) dexIntegrityEntries else emptyList()
             val plain = buildString {
                 appendLine(flags)
-                appendLine(pinnedCert)
+                appendLine("NONE")
                 appendLine(entries.size)
                 entries.forEach { appendLine(it) }
                 appendLine(dexEntries.size)

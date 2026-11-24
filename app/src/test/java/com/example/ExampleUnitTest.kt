@@ -440,34 +440,34 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `section active counts match 8 upper section and 6 lower section toggles`() {
+    fun `section active counts match 7 upper section and 6 lower section toggles`() {
         val allOn = ProtectionConfig(
             detectRoot = true,
             detectDebugger = true,
             antiScreenshot = true,
             antiTampering = true,
-            signaturePinning = true,
             antiDump = true,
             dexIntegrityProtection = true,
+            assistEncrypt = true,
             dsProDexEncryption = true,
             stringEncryption = true,
             controlFlowObfuscation = true,
             resourceEncryption = true,
             disableDebuggable = true,
-            disableBackup = true,
             stripDexDebug = true,
         )
-        assertEquals(8, allOn.activeCountFor(ProtectionSection.RUNTIME_GUARD))
+        assertEquals(7, allOn.activeCountFor(ProtectionSection.RUNTIME_GUARD))
         assertEquals(6, allOn.activeCountFor(ProtectionSection.BINARY_HARDENING))
-        assertEquals(14, allOn.activeToggleCount)
+        assertEquals(13, allOn.activeToggleCount)
         assertTrue(allOn.requiresRuntimeGuard)
         assertTrue(allOn.requiresGuardDex)
         assertTrue(allOn.requiresCoreDexContainer)
-        assertFalse(ProtectionConfig(disableBackup = true).requiresGuardDex)
+        assertFalse(ProtectionConfig(assistEncrypt = true).requiresRuntimeGuard)
+        assertTrue(ProtectionConfig(assistEncrypt = true).requiresGuardDex)
     }
 
     @Test
-    fun `axml manifest patcher disables debuggable backup and injects guard plus dspro core`() {
+    fun `axml manifest patcher disables debuggable preserves allowBackup and injects guard plus dspro core`() {
         val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest(
             packageName = "com.demo.app",
             debuggable = true,
@@ -477,7 +477,6 @@ class ExampleUnitTest {
             rawManifest,
             AxmlPatchOptions(
                 disableDebuggable = true,
-                disableBackup = true,
                 injectGuardProvider = true,
                 enableCoreProtection = true,
                 protectionIdentifier = AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE,
@@ -485,14 +484,13 @@ class ExampleUnitTest {
             ),
         )
         assertTrue(patched.debuggableDisabled)
-        assertTrue(patched.backupDisabled)
         assertTrue(patched.guardProviderInjected)
         assertTrue(patched.coreProtectionInjected)
         assertTrue(patched.protectionIdentifierEmbedded)
 
         val verified = AxmlManifestPatcher.inspectForTest(patched.manifestBytes)
         assertEquals(false, verified.first)
-        assertEquals(false, verified.second)
+        assertEquals(true, verified.second)
         assertTrue(verified.third)
 
         val (appName, factoryName) = AxmlManifestPatcher.inspectCoreForTest(patched.manifestBytes)
@@ -648,15 +646,14 @@ class ExampleUnitTest {
                 detectDebugger = true,
                 antiScreenshot = true,
                 antiTampering = true,
-                signaturePinning = true,
                 antiDump = true,
                 dexIntegrityProtection = true,
+                assistEncrypt = true,
                 dsProDexEncryption = true,
                 stringEncryption = true,
                 controlFlowObfuscation = true,
                 resourceEncryption = true,
                 disableDebuggable = true,
-                disableBackup = true,
                 stripDexDebug = true,
             )
 
@@ -679,6 +676,7 @@ class ExampleUnitTest {
             assertEquals(2, stats.encryptedDexCount)
             assertEquals(1, stats.encryptedStringsCount)
             assertEquals(2, stats.encryptedResourceCount)
+            assertEquals(2, stats.encryptedAssistCount)
             assertTrue(stats.cfoTransformedUnits >= 2)
             assertEquals(2, stats.dexIntegrityCount)
             assertEquals("classes2.dex", stats.injectedGuardDexName)
@@ -698,7 +696,8 @@ class ExampleUnitTest {
                 assertTrue(outZip.entries().asSequence().none { it.name.contains("dpt", ignoreCase = true) })
 
                 val decryptedAssets = decryptResourceVault(outZip, "com.demo.app")
-                assertEquals(2, decryptedAssets.size)
+                assertTrue(decryptedAssets.containsKey("AndroidManifest.xml"))
+                assertEquals(3, decryptedAssets.size)
                 assertArrayEquals(jsonAsset, decryptedAssets["assets/config/app.json"])
                 assertArrayEquals(txtAsset, decryptedAssets["assets/secret.txt"])
 
@@ -720,9 +719,9 @@ class ExampleUnitTest {
                 assertFalse(rawText.contains("AndroidManifest.xml"))
 
                 val guardLines = decryptGuardPolicy(outZip, "com.demo.app")
-                // 1 + 16 + 32 + 64 + 128 + 256 + 512 = 1009
-                assertEquals("1009", guardLines[0])
-                assertEquals("AB:CD:EF", guardLines[1])
+                // 1 + 16 + 32 + 64 + 256 + 512 = 881
+                assertEquals("881", guardLines[0])
+                assertEquals("NONE", guardLines[1])
                 assertEquals("7", guardLines[2])
                 val dexCountLine = guardLines[3 + 7]
                 assertEquals("2", dexCountLine)
@@ -801,15 +800,14 @@ class ExampleUnitTest {
                 detectDebugger = true,
                 antiScreenshot = true,
                 antiTampering = true,
-                signaturePinning = true,
                 antiDump = true,
                 dexIntegrityProtection = true,
+                assistEncrypt = true,
                 dsProDexEncryption = true,
                 stringEncryption = true,
                 controlFlowObfuscation = true,
                 resourceEncryption = true,
                 disableDebuggable = true,
-                disableBackup = true,
                 stripDexDebug = true,
             )
 
@@ -823,7 +821,6 @@ class ExampleUnitTest {
             )
 
             assertTrue(stats.debuggableDisabled)
-            assertTrue(stats.backupDisabled)
             assertTrue(stats.guardProviderInjected)
             assertTrue(stats.coreProtectionInjected)
             assertTrue(stats.encryptedDexCount >= 1)
@@ -841,7 +838,7 @@ class ExampleUnitTest {
                 val manifestBytes = zip.getInputStream(zip.getEntry("AndroidManifest.xml")).readBytes()
                 val (dbg, bkp, hasProvider) = AxmlManifestPatcher.inspectForTest(manifestBytes)
                 assertEquals(false, dbg)
-                assertEquals(false, bkp)
+                assertEquals(false, bkp) // source app manifest already has allowBackup="false"
                 assertTrue(hasProvider)
 
                 val (shellApp, shellFactory) = AxmlManifestPatcher.inspectCoreForTest(manifestBytes)
@@ -856,7 +853,7 @@ class ExampleUnitTest {
                 decryptedDexes.forEach { assertTrue(DexPatcher.isValidDex(it)) }
 
                 val summary = AxmlManifestPatcher.inspectSecuritySummary(manifestBytes)
-                assertTrue(summary != null && summary.hasGuardProvider && summary.hasCoreProtection && !summary.isDebuggable && !summary.allowsBackup)
+                assertTrue(summary != null && summary.hasGuardProvider && summary.hasCoreProtection && !summary.isDebuggable)
                 assertEquals("DS 专业版", summary?.protectionIdentifier)
 
                 assertArrayEquals(coreBytes, zip.getInputStream(zip.getEntry("classes.dex")).readBytes())
@@ -990,7 +987,6 @@ class ExampleUnitTest {
                 dsProDexEncryption = true,
                 resourceEncryption = true,
                 disableDebuggable = true,
-                disableBackup = true,
                 stripDexDebug = true,
             )
 
@@ -1064,7 +1060,6 @@ class ExampleUnitTest {
                 config = ProtectionConfig(
                     controlFlowObfuscation = true,
                     disableDebuggable = true,
-                    disableBackup = true,
                     stripDexDebug = true,
                 ),
             )
@@ -1220,9 +1215,9 @@ class ExampleUnitTest {
                 ProtectionConfig(detectDebugger = true) to "16",
                 ProtectionConfig(antiScreenshot = true) to "32",
                 ProtectionConfig(antiTampering = true) to "64",
-                ProtectionConfig(signaturePinning = true) to "128",
                 ProtectionConfig(antiDump = true) to "256",
                 ProtectionConfig(dexIntegrityProtection = true) to "512",
+                ProtectionConfig(assistEncrypt = true) to "0",
             )
 
             bitmaskCases.forEachIndexed { idx, (cfg, expectedMask) ->
@@ -1276,21 +1271,21 @@ class ExampleUnitTest {
     @Test
     fun `every individual protection toggle increments its exact section count and dependency flags`() {
         val upperCases = listOf(
-            ProtectionConfig(detectRoot = true) to true,
-            ProtectionConfig(detectDebugger = true) to true,
-            ProtectionConfig(antiScreenshot = true) to true,
-            ProtectionConfig(antiTampering = true) to true,
-            ProtectionConfig(signaturePinning = true) to true,
-            ProtectionConfig(antiDump = true) to true,
-            ProtectionConfig(dexIntegrityProtection = true) to true,
-            ProtectionConfig(disableBackup = true) to false,
+            ProtectionConfig(detectRoot = true) to Pair(true, true),
+            ProtectionConfig(detectDebugger = true) to Pair(true, true),
+            ProtectionConfig(antiScreenshot = true) to Pair(true, true),
+            ProtectionConfig(antiTampering = true) to Pair(true, true),
+            ProtectionConfig(antiDump = true) to Pair(true, true),
+            ProtectionConfig(dexIntegrityProtection = true) to Pair(true, true),
+            ProtectionConfig(assistEncrypt = true) to Pair(false, true),
         )
-        upperCases.forEach { (cfg, needsGuard) ->
+        upperCases.forEach { (cfg, expected) ->
+            val (needsRuntimeGuard, needsGuardDex) = expected
             assertEquals(1, cfg.activeToggleCount)
             assertEquals(1, cfg.activeCountFor(ProtectionSection.RUNTIME_GUARD))
             assertEquals(0, cfg.activeCountFor(ProtectionSection.BINARY_HARDENING))
-            assertEquals(needsGuard, cfg.requiresRuntimeGuard)
-            assertEquals(needsGuard, cfg.requiresGuardDex)
+            assertEquals(needsRuntimeGuard, cfg.requiresRuntimeGuard)
+            assertEquals(needsGuardDex, cfg.requiresGuardDex)
             assertFalse(cfg.requiresCoreDexContainer)
         }
 
@@ -1309,6 +1304,136 @@ class ExampleUnitTest {
             assertFalse(cfg.requiresRuntimeGuard)
             assertEquals(needsGuardDex, cfg.requiresGuardDex)
             assertEquals(needsCoreDex, cfg.requiresCoreDexContainer)
+        }
+    }
+
+    @Test
+    fun `assist encrypt seals stored xml zip json and db files while keeping flutter and native assets untouched`() {
+        val tempDir = Files.createTempDirectory("dspro_assist_encrypt_test").toFile()
+        try {
+            val inputApk = File(tempDir, "assist_target.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.assist.target", debuggable = true, allowBackup = true)
+            val appDex = buildSyntheticDex(withDebugInfo = false)
+            val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
+
+            val storedXml = "<config><feature enabled=\"true\"/></config>".toByteArray(Charsets.UTF_8)
+            val nestedZipBytes = ByteArrayOutputStream().apply {
+                ZipOutputStream(this).use { inner ->
+                    inner.putNextEntry(ZipEntry("rules/patch.json"))
+                    inner.write("""{"unlock":false}""".toByteArray(Charsets.UTF_8))
+                    inner.closeEntry()
+                }
+            }.toByteArray()
+            val deflatedJson = """{"endpoint":"https://config.target/v1"}""".toByteArray(Charsets.UTF_8)
+            val deflatedDb = byteArrayOf(0x53, 0x51, 0x4C, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6F, 0x72, 0x6D, 0x61, 0x74, 0x20, 0x33, 0x00)
+            val flutterBlob = byteArrayOf(0x01, 0x02, 0x03, 0x04)
+            val tfliteBlob = byteArrayOf(0x11, 0x22, 0x33, 0x44)
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/config/rules.xml").apply {
+                    method = ZipEntry.STORED
+                    size = storedXml.size.toLong()
+                    compressedSize = storedXml.size.toLong()
+                    crc = CRC32().apply { update(storedXml) }.value
+                })
+                zip.write(storedXml)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/bundle/patch.zip").apply {
+                    method = ZipEntry.STORED
+                    size = nestedZipBytes.size.toLong()
+                    compressedSize = nestedZipBytes.size.toLong()
+                    crc = CRC32().apply { update(nestedZipBytes) }.value
+                })
+                zip.write(nestedZipBytes)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/settings.json"))
+                zip.write(deflatedJson)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/data/game.db"))
+                zip.write(deflatedDb)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/flutter_assets/kernel_blob.bin"))
+                zip.write(flutterBlob)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/model.tflite").apply {
+                    method = ZipEntry.STORED
+                    size = tfliteBlob.size.toLong()
+                    compressedSize = tfliteBlob.size.toLong()
+                    crc = CRC32().apply { update(tfliteBlob) }.value
+                })
+                zip.write(tfliteBlob)
+                zip.closeEntry()
+            }
+
+            val outApk = File(tempDir, "assist_protected.apk")
+            val stats = ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = outApk,
+                analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.assist.target"),
+                config = ProtectionConfig(assistEncrypt = true),
+                guardDexBytes = guardDex,
+            )
+
+            assertEquals(4, stats.encryptedAssistCount)
+            assertTrue(stats.guardProviderInjected)
+            assertTrue(ApkProtectionProcessor.verifyOutputApk(outApk).first)
+
+            ZipFile(outApk).use { zip ->
+                // Plain editable files are no longer exposed in assets/
+                assertTrue(zip.getEntry("assets/config/rules.xml") == null)
+                assertTrue(zip.getEntry("assets/bundle/patch.zip") == null)
+                assertTrue(zip.getEntry("assets/settings.json") == null)
+                assertTrue(zip.getEntry("assets/data/game.db") == null)
+
+                // Engine / ML assets remain untouched in APK
+                assertArrayEquals(flutterBlob, zip.getInputStream(zip.getEntry("assets/flutter_assets/kernel_blob.bin")).readBytes())
+                assertArrayEquals(tfliteBlob, zip.getInputStream(zip.getEntry("assets/model.tflite")).readBytes())
+                assertTrue(zip.getEntry("assets/dspro_res.bin") != null)
+
+                // Manifest keeps original allowBackup intact and embeds DsProGuardProvider
+                val outManifest = zip.getInputStream(zip.getEntry("AndroidManifest.xml")).readBytes()
+                val summary = AxmlManifestPatcher.inspectSecuritySummary(outManifest)
+                assertTrue(summary?.allowsBackup == true)
+                assertTrue(summary?.hasGuardProvider == true)
+
+                // Decrypt the dspro_res.bin vault APK and verify STORED compression methods + exact contents
+                val vaultBlob = zip.getInputStream(zip.getEntry("assets/dspro_res.bin")).use { it.readBytes() }
+                val salt = vaultBlob.copyOfRange(0, 16)
+                val iv = vaultBlob.copyOfRange(16, 28)
+                val saltHex = salt.joinToString("") { "%02x".format(it) }
+                val key = MessageDigest.getInstance("SHA-256").digest("com.assist.target:DSPRO_RES_V1:$saltHex".toByteArray(Charsets.UTF_8))
+                val plainVaultApk = Cipher.getInstance("AES/GCM/NoPadding").run {
+                    init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+                    doFinal(vaultBlob, 28, vaultBlob.size - 28)
+                }
+                val vaultFile = File(tempDir, "decrypted_vault.apk").apply { writeBytes(plainVaultApk) }
+                ZipFile(vaultFile).use { vaultZip ->
+                    assertTrue(vaultZip.getEntry("AndroidManifest.xml") != null)
+                    assertEquals(ZipEntry.STORED, vaultZip.getEntry("assets/config/rules.xml").method)
+                    assertEquals(ZipEntry.STORED, vaultZip.getEntry("assets/bundle/patch.zip").method)
+                    assertEquals(ZipEntry.DEFLATED, vaultZip.getEntry("assets/settings.json").method)
+                    assertEquals(ZipEntry.DEFLATED, vaultZip.getEntry("assets/data/game.db").method)
+                    assertArrayEquals(storedXml, vaultZip.getInputStream(vaultZip.getEntry("assets/config/rules.xml")).readBytes())
+                    assertArrayEquals(nestedZipBytes, vaultZip.getInputStream(vaultZip.getEntry("assets/bundle/patch.zip")).readBytes())
+                    assertArrayEquals(deflatedJson, vaultZip.getInputStream(vaultZip.getEntry("assets/settings.json")).readBytes())
+                    assertArrayEquals(deflatedDb, vaultZip.getInputStream(vaultZip.getEntry("assets/data/game.db")).readBytes())
+                }
+            }
+        } finally {
+            tempDir.deleteRecursively()
         }
     }
 

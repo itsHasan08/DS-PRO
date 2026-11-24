@@ -6,7 +6,6 @@ import java.nio.ByteOrder
 
 data class AxmlPatchOptions(
     val disableDebuggable: Boolean = false,
-    val disableBackup: Boolean = false,
     val injectGuardProvider: Boolean = false,
     val enableCoreProtection: Boolean = false,
     val protectionIdentifier: String = "",
@@ -16,7 +15,6 @@ data class AxmlPatchOptions(
 data class AxmlPatchResult(
     val manifestBytes: ByteArray,
     val debuggableDisabled: Boolean,
-    val backupDisabled: Boolean,
     val guardProviderInjected: Boolean,
     val coreProtectionInjected: Boolean = false,
     val protectionIdentifierEmbedded: Boolean = false,
@@ -259,7 +257,6 @@ object AxmlManifestPatcher {
     fun patch(axmlBytes: ByteArray, options: AxmlPatchOptions): AxmlPatchResult {
         val identifier = options.protectionIdentifier.trim()
         if (!options.disableDebuggable &&
-            !options.disableBackup &&
             !options.injectGuardProvider &&
             !options.enableCoreProtection &&
             identifier.isEmpty()
@@ -267,7 +264,6 @@ object AxmlManifestPatcher {
             return AxmlPatchResult(
                 manifestBytes = axmlBytes,
                 debuggableDisabled = false,
-                backupDisabled = false,
                 guardProviderInjected = false,
                 coreProtectionInjected = false,
                 protectionIdentifierEmbedded = false,
@@ -285,7 +281,6 @@ object AxmlManifestPatcher {
         val appElem = doc.chunks[appIdx] as XmlChunk.StartElement
 
         var debuggableDisabled = false
-        var backupDisabled = false
         var guardProviderInjected = false
         var coreProtectionInjected = false
         var protectionIdentifierEmbedded = false
@@ -297,13 +292,6 @@ object AxmlManifestPatcher {
             val androidNsIdx = ensureAndroidNsIndex(doc)
             setOrInsertBooleanAttr(doc, appElem, androidNsIdx, attrNameIdx, ATTR_DEBUGGABLE, false)
             debuggableDisabled = true
-        }
-
-        if (options.disableBackup) {
-            val attrNameIdx = doc.ensureResourceAttrString("allowBackup", ATTR_ALLOW_BACKUP)
-            val androidNsIdx = ensureAndroidNsIndex(doc)
-            setOrInsertBooleanAttr(doc, appElem, androidNsIdx, attrNameIdx, ATTR_ALLOW_BACKUP, false)
-            backupDisabled = true
         }
 
         if (options.enableCoreProtection) {
@@ -487,7 +475,6 @@ object AxmlManifestPatcher {
         return AxmlPatchResult(
             manifestBytes = encode(doc),
             debuggableDisabled = debuggableDisabled,
-            backupDisabled = backupDisabled,
             guardProviderInjected = guardProviderInjected,
             coreProtectionInjected = coreProtectionInjected,
             protectionIdentifierEmbedded = protectionIdentifierEmbedded,

@@ -13,14 +13,14 @@ data class ProtectionFeatureInfo(
 )
 
 data class ProtectionConfig(
-    // Runtime Guard (all OFF by default — enforced via injected DsProGuardProvider DEX)
+    // Runtime Guard & Assist Protection (all OFF by default — enforced via injected DsProGuardProvider DEX)
     val detectRoot: Boolean = false,
     val detectDebugger: Boolean = false,
     val antiScreenshot: Boolean = false,
     val antiTampering: Boolean = false,
-    val signaturePinning: Boolean = false,
     val antiDump: Boolean = false,
     val dexIntegrityProtection: Boolean = false,
+    val assistEncrypt: Boolean = false,
 
     // DS PRO Core & Binary Hardening (DEX/String/Resource encryption, CFO, AXML/DEX hardening)
     val dsProDexEncryption: Boolean = false,
@@ -28,7 +28,6 @@ data class ProtectionConfig(
     val controlFlowObfuscation: Boolean = false,
     val resourceEncryption: Boolean = false,
     val disableDebuggable: Boolean = false,
-    val disableBackup: Boolean = false,
     val stripDexDebug: Boolean = false,
 ) {
     val requiresRuntimeGuard: Boolean
@@ -36,12 +35,14 @@ data class ProtectionConfig(
             detectDebugger ||
             antiScreenshot ||
             antiTampering ||
-            signaturePinning ||
             antiDump ||
             dexIntegrityProtection
 
+    val requiresAssetVault: Boolean
+        get() = resourceEncryption || assistEncrypt
+
     val requiresGuardDex: Boolean
-        get() = requiresRuntimeGuard || resourceEncryption
+        get() = requiresRuntimeGuard || requiresAssetVault
 
     val requiresCoreDexContainer: Boolean
         get() = dsProDexEncryption || stringEncryption
@@ -52,15 +53,14 @@ data class ProtectionConfig(
             detectDebugger,
             antiScreenshot,
             antiTampering,
-            signaturePinning,
             antiDump,
             dexIntegrityProtection,
+            assistEncrypt,
             dsProDexEncryption,
             stringEncryption,
             controlFlowObfuscation,
             resourceEncryption,
             disableDebuggable,
-            disableBackup,
             stripDexDebug,
         ).count { it }
 
@@ -70,10 +70,9 @@ data class ProtectionConfig(
             detectDebugger,
             antiScreenshot,
             antiTampering,
-            signaturePinning,
             antiDump,
             dexIntegrityProtection,
-            disableBackup,
+            assistEncrypt,
         ).count { it }
 
         ProtectionSection.BINARY_HARDENING -> listOf(

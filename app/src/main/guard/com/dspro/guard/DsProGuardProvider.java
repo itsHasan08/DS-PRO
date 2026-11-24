@@ -5,10 +5,6 @@ import android.app.Application;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.Signature;
-import android.content.pm.SigningInfo;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
 import android.content.res.loader.ResourcesLoader;
@@ -74,7 +70,6 @@ public final class DsProGuardProvider extends ContentProvider {
     private static final int FLAG_DETECT_DEBUGGER = 1 << 4;
     private static final int FLAG_ANTI_SCREENSHOT = 1 << 5;
     private static final int FLAG_ANTI_TAMPERING = 1 << 6;
-    private static final int FLAG_SIGNATURE_PINNING = 1 << 7;
     private static final int FLAG_ANTI_DUMP = 1 << 8;
     private static final int FLAG_DEX_INTEGRITY = 1 << 9;
 
@@ -101,18 +96,15 @@ public final class DsProGuardProvider extends ContentProvider {
 
     private static final class GuardPolicy {
         final int flags;
-        final String pinnedCertSha256;
         final List<String> integrityEntries;
         final List<String> dexIntegrityEntries;
 
         GuardPolicy(
             int flags,
-            String pinnedCertSha256,
             List<String> integrityEntries,
             List<String> dexIntegrityEntries
         ) {
             this.flags = flags;
-            this.pinnedCertSha256 = pinnedCertSha256;
             this.integrityEntries = integrityEntries;
             this.dexIntegrityEntries = dexIntegrityEntries;
         }
@@ -132,26 +124,29 @@ public final class DsProGuardProvider extends ContentProvider {
         mountEncryptedResourcesIfNeeded(context);
 
         final GuardPolicy policy = readEncryptedPolicy(context);
-        if (policy == null) {
-            return true;
-        }
-
-        enforceChecks(context, policy);
-
-        final boolean antiScreenshot = policy.has(FLAG_ANTI_SCREENSHOT);
-        final boolean detectDebugger = policy.has(FLAG_DETECT_DEBUGGER);
-        final boolean antiDump = policy.has(FLAG_ANTI_DUMP);
-        final boolean antiTampering = policy.has(FLAG_ANTI_TAMPERING);
-        final boolean dexIntegrity = policy.has(FLAG_DEX_INTEGRITY);
-
         final Context appCtx = context.getApplicationContext();
         if (appCtx != null) {
             attachResourcesIfMounted(appCtx);
         }
 
+        if (policy != null) {
+            enforceChecks(context, policy);
+        }
+
+        final boolean antiScreenshot = policy != null && policy.has(FLAG_ANTI_SCREENSHOT);
+        final boolean detectDebugger = policy != null && policy.has(FLAG_DETECT_DEBUGGER);
+        final boolean antiDump = policy != null && policy.has(FLAG_ANTI_DUMP);
+        final boolean antiTampering = policy != null && policy.has(FLAG_ANTI_TAMPERING);
+        final boolean dexIntegrity = policy != null && policy.has(FLAG_DEX_INTEGRITY);
+
         if (appCtx instanceof Application) {
             ((Application) appCtx).registerActivityLifecycleCallbacks(
                 new Application.ActivityLifecycleCallbacks() {
+                    @Override
+                    public void onActivityPreCreated(Activity activity, Bundle savedInstanceState) {
+                        attachResourcesIfMounted(activity);
+                    }
+
                     @Override
                     public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
                         attachResourcesIfMounted(activity);
@@ -193,7 +188,7 @@ public final class DsProGuardProvider extends ContentProvider {
             );
         }
 
-        if (antiDump || detectDebugger || antiTampering || dexIntegrity) {
+        if (policy != null && (antiDump || detectDebugger || antiTampering || dexIntegrity)) {
             startLiveWatchdog(appCtx != null ? appCtx : context, policy);
         }
 
@@ -401,17 +396,6 @@ public final class DsProGuardProvider extends ContentProvider {
                     if (policy.has(FLAG_ANTI_TAMPERING) && !verifyCriticalApkIntegrity(context, policy.integrityEntries)) {
                         crashWithReason(/*O*/"APK tampering detected"/*O*/);
                     }
-                    state = 0x6B3;
-                    break;
-                case 0x6B3:
-                    if (policy.has(FLAG_SIGNATURE_PINNING)) {
-                        final String expectedCert = policy.pinnedCertSha256;
-                        if (!expectedCert.isEmpty() && !"UNSIGNED".equalsIgnoreCase(expectedCert)) {
-                            if (!verifySigningCert(context, expectedCert)) {
-                                crashWithReason(/*O*/"APK signature mismatch"/*O*/);
-                            }
-                        }
-                    }
                     state = 0;
                     break;
                 default:
@@ -540,7 +524,7 @@ public final class DsProGuardProvider extends ContentProvider {
                 return null;
             }
             int flags = Integer.parseInt(lines[0].trim());
-            String pinnedCert = lines[1].trim();
+            // lines[1] reserved header slot
             int integrityCount = Integer.parseInt(lines[2].trim());
             List<String> integrityEntries = new ArrayList<>(Math.max(0, integrityCount));
             for (int i = 0; i < integrityCount && (3 + i) < lines.length; i++) {
@@ -564,7 +548,6 @@ public final class DsProGuardProvider extends ContentProvider {
             }
             return new GuardPolicy(
                 flags,
-                pinnedCert,
                 Collections.unmodifiableList(integrityEntries),
                 dexIntegrityEntries
             );
@@ -1130,42 +1113,6 @@ public final class DsProGuardProvider extends ContentProvider {
                 verified++;
             }
             return verified > 0;
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    private static boolean verifySigningCert(Context context, String expectedColonHex) {
-        try {
-            PackageManager pm = context.getPackageManager();
-            String pkg = context.getPackageName();
-            byte[] certBytes = null;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                PackageInfo info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES);
-                SigningInfo si = info.signingInfo;
-                if (si != null) {
-                    Signature[] sigs = si.hasMultipleSigners() ? si.getApkContentsSigners() : si.getSigningCertificateHistory();
-                    if (sigs != null && sigs.length > 0) {
-                        certBytes = sigs[0].toByteArray();
-                    }
-                }
-            } else {
-                PackageInfo info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES);
-                if (info.signatures != null && info.signatures.length > 0) {
-                    certBytes = info.signatures[0].toByteArray();
-                }
-            }
-            if (certBytes == null) {
-                return false;
-            }
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(certBytes);
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < digest.length; i++) {
-                if (i > 0) sb.append(':');
-                sb.append(String.format(Locale.US, "%02X", digest[i] & 0xFF));
-            }
-            return sb.toString().equalsIgnoreCase(expectedColonHex);
         } catch (Throwable t) {
             return false;
         }

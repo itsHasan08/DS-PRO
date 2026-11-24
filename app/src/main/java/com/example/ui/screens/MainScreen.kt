@@ -401,22 +401,6 @@ fun MainScreen(
                                 .padding(top = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            if (cfg.signaturePinning) {
-                                Surface(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = ErrorTint,
-                                    border = BorderStroke(1.dp, ErrorRed.copy(alpha = 0.35f)),
-                                ) {
-                                    Text(
-                                        text = "Signature Pinning is ON: re-sign the output APK with the original signing certificate, otherwise the app will exit on launch.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = ErrorRed,
-                                        modifier = Modifier.padding(10.dp),
-                                    )
-                                }
-                            }
-
                             Button(
                                 onClick = { viewModel.startProtection() },
                                 enabled = uiState.isStartEnabled,
@@ -502,13 +486,6 @@ private val INFO_ANTI_TAMPERING = ProtectionFeatureInfo(
     howItWorks = "Verifies every tracked file inside the installed APK at startup and periodically via watchdog. If any file is altered or replaced, the app crashes with 'APK tampering detected'.",
 )
 
-private val INFO_SIGNATURE_PINNING = ProtectionFeatureInfo(
-    id = "signature_pinning",
-    title = "Signature Pinning",
-    whatTurnsOn = "Pins the input APK's signing certificate SHA-256 hash inside encrypted assets/dspro_guard.bin.",
-    howItWorks = "Checks the installed app's signing certificate at runtime. Note: you must re-sign the output APK with the original keystore, otherwise it crashes with 'APK signature mismatch'.",
-)
-
 private val INFO_ANTI_DUMP = ProtectionFeatureInfo(
     id = "anti_dump",
     title = "Anti Dump",
@@ -558,11 +535,11 @@ private val INFO_DISABLE_DEBUGGABLE = ProtectionFeatureInfo(
     howItWorks = "Blocks JDWP debugger attachment and run-as inspection at the Android OS level without altering the rest of the manifest.",
 )
 
-private val INFO_DISABLE_BACKUP = ProtectionFeatureInfo(
-    id = "disable_backup",
-    title = "Block App Backup",
-    whatTurnsOn = "Patches binary AndroidManifest.xml to set android:allowBackup=\"false\".",
-    howItWorks = "Prevents ADB backup and automatic cloud backup extraction of the app's private data directory.",
+private val INFO_ASSIST_ENCRYPT = ProtectionFeatureInfo(
+    id = "assist_encrypt",
+    title = "Assist Encrypt",
+    whatTurnsOn = "Encrypts modifiable files inside assets/ (XML, JSON, ZIP archives, databases, configs, scripts, text & data — including STORED entries) with AES-256-GCM into assets/dspro_res.bin.",
+    howItWorks = "Removes plain editable files from assets/ so attackers cannot view or modify them, then transparently decrypts and mounts the protected overlay vault at runtime via Android ResourcesLoader / AssetManager with zero broken functionality.",
 )
 
 private val INFO_STRIP_DEX_DEBUG = ProtectionFeatureInfo(
@@ -577,10 +554,9 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
     ToggleSpec(INFO_DETECT_DEBUGGER, cfg.detectDebugger, "switch_detect_debugger") { v -> vm.updateConfig { it.copy(detectDebugger = v) } },
     ToggleSpec(INFO_ANTI_SCREENSHOT, cfg.antiScreenshot, "switch_anti_screenshot") { v -> vm.updateConfig { it.copy(antiScreenshot = v) } },
     ToggleSpec(INFO_ANTI_TAMPERING, cfg.antiTampering, "switch_anti_tampering") { v -> vm.updateConfig { it.copy(antiTampering = v) } },
-    ToggleSpec(INFO_SIGNATURE_PINNING, cfg.signaturePinning, "switch_signature_pinning") { v -> vm.updateConfig { it.copy(signaturePinning = v) } },
     ToggleSpec(INFO_ANTI_DUMP, cfg.antiDump, "switch_anti_dump") { v -> vm.updateConfig { it.copy(antiDump = v) } },
     ToggleSpec(INFO_DEX_INTEGRITY, cfg.dexIntegrityProtection, "switch_dex_integrity") { v -> vm.updateConfig { it.copy(dexIntegrityProtection = v) } },
-    ToggleSpec(INFO_DISABLE_BACKUP, cfg.disableBackup, "switch_disable_backup") { v -> vm.updateConfig { it.copy(disableBackup = v) } },
+    ToggleSpec(INFO_ASSIST_ENCRYPT, cfg.assistEncrypt, "switch_assist_encrypt") { v -> vm.updateConfig { it.copy(assistEncrypt = v) } },
 )
 
 private fun binaryHardeningToggles(cfg: ProtectionConfig, vm: MainViewModel) = listOf(
