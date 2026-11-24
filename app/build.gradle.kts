@@ -151,6 +151,21 @@ abstract class BuildGuardDexTask : DefaultTask() {
       deleteRecursively()
       mkdirs()
     }
+    val stagedSrcDir = temporaryDir.resolve("${name}_src").apply {
+      deleteRecursively()
+      mkdirs()
+    }
+    val stagedSources = sourceFiles.mapIndexed { idx, rawPath ->
+      val srcFile = File(rawPath)
+      val rawText = srcFile.readText(Charsets.UTF_8)
+      val helperTarget = if (name == "guard") "_xs" else "DsProCoreLoader._xs"
+      val transformed = obfuscateMarkedLiterals(rawText, helperTarget, seedBase = (name.hashCode() xor (idx * 997)))
+      val destFile = stagedSrcDir.resolve("$idx/${srcFile.name}").apply {
+        parentFile?.mkdirs()
+      }
+      destFile.writeText(transformed, Charsets.UTF_8)
+      destFile.absolutePath
+    }
     val javacBin = File(System.getProperty("java.home"), "bin/javac").absolutePath
     execOperations.exec {
       commandLine(
@@ -161,7 +176,7 @@ abstract class BuildGuardDexTask : DefaultTask() {
           "-Xlint:-options",
           "-classpath", platformJar.absolutePath,
           "-d", classesDir.absolutePath,
-        ) + sourceFiles,
+        ) + stagedSources,
       )
     }
     val classFiles = classesDir.walkTopDown()
@@ -186,6 +201,23 @@ abstract class BuildGuardDexTask : DefaultTask() {
     val builtDex = dexTempDir.resolve("classes.dex")
     require(builtDex.exists() && builtDex.length() > 64) { "Failed to generate ${outputDex.name}" }
     builtDex.copyTo(outputDex, overwrite = true)
+  }
+
+  private fun obfuscateMarkedLiterals(source: String, helperCall: String, seedBase: Int): String {
+    val pattern = Regex("""/\*O\*/"([^"\\]*)"/\*O\*/""")
+    var counter = 1
+    return pattern.replace(source) { match ->
+      val literal = match.groupValues[1]
+      val rawBytes = literal.toByteArray(Charsets.UTF_8)
+      val seed = ((seedBase + counter * 7919) and 0x7FFF) or 1
+      counter++
+      val encoded = rawBytes.mapIndexed { i, b ->
+        val mask = (seed + i * 31) and 0xFF
+        val enc = (b.toInt() and 0xFF) xor mask
+        "(byte)0x%02X".format(enc)
+      }.joinToString(",")
+      "$helperCall($seed,new byte[]{$encoded})"
+    }
   }
 }
 

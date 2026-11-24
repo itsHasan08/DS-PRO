@@ -53,8 +53,13 @@ object DexPatcher {
             return dexBytes to DexStripStats(0, 0)
         }
 
+        val dataSize = buf.getInt(104)
+        val dataOff = buf.getInt(108)
+        val dataEnd = if (dataOff > 0 && dataSize > 0) minOf(out.size, dataOff + dataSize) else out.size
+
         var sourceFilesCleared = 0
         var debugInfosCleared = 0
+        val debugItemOffsets = LinkedHashSet<Int>()
 
         for (i in 0 until classDefsSize) {
             val itemOff = classDefsOff + i * 32
@@ -66,7 +71,13 @@ object DexPatcher {
 
             val classDataOff = buf.getInt(itemOff + 24)
             if (classDataOff > 0 && classDataOff < out.size) {
-                debugInfosCleared += clearClassDataMethodDebugOffsets(out, buf, classDataOff)
+                debugInfosCleared += clearClassDataMethodDebugOffsets(out, buf, classDataOff, debugItemOffsets)
+            }
+        }
+
+        for (debugOff in debugItemOffsets) {
+            if (debugOff >= dataOff && debugOff < dataEnd) {
+                wipeDebugInfoItem(out, debugOff, dataEnd)
             }
         }
 
@@ -98,6 +109,7 @@ object DexPatcher {
         bytes: ByteArray,
         buf: ByteBuffer,
         startOffset: Int,
+        debugItemOffsets: MutableSet<Int>,
     ): Int {
         var pos = startOffset
         val staticFields = readUleb128(bytes, pos).also { pos = it.nextPos }.value
@@ -123,6 +135,9 @@ object DexPatcher {
             if (codeOff > 0 && codeOff + 12 <= bytes.size) {
                 val debugInfoOff = buf.getInt(codeOff + 8)
                 if (debugInfoOff != 0) {
+                    if (debugInfoOff > 0) {
+                        debugItemOffsets += debugInfoOff
+                    }
                     buf.putInt(codeOff + 8, 0)
                     cleared++
                 }
@@ -131,13 +146,55 @@ object DexPatcher {
         return cleared
     }
 
+    private fun wipeDebugInfoItem(bytes: ByteArray, start: Int, limit: Int) {
+        var pos = start
+        pos = readUleb128(bytes, pos, limit).nextPos // line_start
+        val paramRes = readUleb128(bytes, pos, limit)
+        pos = paramRes.nextPos
+        val paramCount = paramRes.value
+        if (paramCount < 0 || paramCount > 255 || pos >= limit) return
+        for (i in 0 until paramCount) {
+            pos = readUleb128(bytes, pos, limit).nextPos
+            if (pos > limit) return
+        }
+        var steps = 0
+        while (pos < limit && steps < 65536) {
+            steps++
+            val op = bytes[pos++].toInt() and 0xFF
+            when (op) {
+                0x00 -> {
+                    // Valid end of debug_info_item: overwrite all consumed bytes with 0x00
+                    for (k in start until pos) {
+                        bytes[k] = 0
+                    }
+                    return
+                }
+                0x01, 0x02, 0x05, 0x06, 0x09 -> {
+                    pos = readUleb128(bytes, pos, limit).nextPos
+                }
+                0x03 -> {
+                    pos = readUleb128(bytes, pos, limit).nextPos
+                    pos = readUleb128(bytes, pos, limit).nextPos
+                    pos = readUleb128(bytes, pos, limit).nextPos
+                }
+                0x04 -> {
+                    pos = readUleb128(bytes, pos, limit).nextPos
+                    pos = readUleb128(bytes, pos, limit).nextPos
+                    pos = readUleb128(bytes, pos, limit).nextPos
+                    pos = readUleb128(bytes, pos, limit).nextPos
+                }
+                else -> Unit // 0x07, 0x08, and 0x0A..0xFF special opcodes take no operands
+            }
+        }
+    }
+
     private data class UlebResult(val value: Int, val nextPos: Int)
 
-    private fun readUleb128(bytes: ByteArray, start: Int): UlebResult {
+    private fun readUleb128(bytes: ByteArray, start: Int, limit: Int = bytes.size): UlebResult {
         var result = 0
         var shift = 0
         var pos = start
-        while (pos < bytes.size) {
+        while (pos < limit && shift <= 28) {
             val b = bytes[pos++].toInt() and 0xFF
             result = result or ((b and 0x7F) shl shift)
             if ((b and 0x80) == 0) break

@@ -16,24 +16,31 @@ import android.os.Bundle;
 import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
 import android.util.Log;
 import android.view.WindowManager;
 
+import dalvik.system.BaseDexClassLoader;
+import dalvik.system.InMemoryDexClassLoader;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileReader;
 import java.io.InputStream;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
-import dalvik.system.BaseDexClassLoader;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.zip.Inflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -44,7 +51,7 @@ import javax.crypto.spec.SecretKeySpec;
 /**
  * Runtime protection guard compiled into ds_pro_guard.dex and injected into protected APKs.
  * Reads encrypted binary security configuration from assets/dspro_guard.bin, wipes keys immediately,
- * enforces checks at startup/Activity resume, and runs a live anti-dump watchdog thread.
+ * enforces checks at startup/Activity resume, and runs a burst-polling anti-dump watchdog thread.
  */
 public final class DsProGuardProvider extends ContentProvider {
 
@@ -59,8 +66,16 @@ public final class DsProGuardProvider extends ContentProvider {
     private static final int FLAG_SIGNATURE_PINNING = 1 << 7;
     private static final int FLAG_ANTI_DUMP = 1 << 8;
 
-    private static final String POLICY_ASSET = "dspro_guard.bin";
+    private static final String POLICY_ASSET = /*O*/"dspro_guard.bin"/*O*/;
     private static volatile boolean watchdogStarted = false;
+
+    static String _xs(int seed, byte[] data) {
+        byte[] out = new byte[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = (byte) ((data[i] & 0xFF) ^ ((seed + i * 31) & 0xFF));
+        }
+        return new String(out, StandardCharsets.UTF_8);
+    }
 
     private static final class GuardPolicy {
         final int flags;
@@ -120,10 +135,10 @@ public final class DsProGuardProvider extends ContentProvider {
                                 activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
                             }
                             if (detectDebugger && isDebuggerAttached()) {
-                                crashWithReason("Debugger detected");
+                                crashWithReason(/*O*/"Debugger detected"/*O*/);
                             }
                             if (detectXposed && isHookingClassPresent()) {
-                                crashWithReason("Xposed / Frida hooking detected");
+                                crashWithReason(/*O*/"Xposed / Frida hooking detected"/*O*/);
                             }
                         }
 
@@ -156,28 +171,28 @@ public final class DsProGuardProvider extends ContentProvider {
 
     private static void enforceChecks(Context context, GuardPolicy policy) {
         if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
-            crashWithReason("Debugger detected");
+            crashWithReason(/*O*/"Debugger detected"/*O*/);
         }
-        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(context)) {
-            crashWithReason("Memory / APK dumper detected");
+        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(context, true)) {
+            crashWithReason(/*O*/"Memory / APK dumper detected"/*O*/);
         }
         if (policy.has(FLAG_DETECT_ROOT) && isDeviceRooted()) {
-            crashWithReason("Root detected");
+            crashWithReason(/*O*/"Root detected"/*O*/);
         }
         if (policy.has(FLAG_DETECT_EMULATOR) && isEmulator()) {
-            crashWithReason("Emulator detected");
+            crashWithReason(/*O*/"Emulator detected"/*O*/);
         }
         if (policy.has(FLAG_DETECT_XPOSED) && isHookingFrameworkPresent()) {
-            crashWithReason("Xposed / Frida hooking detected");
+            crashWithReason(/*O*/"Xposed / Frida hooking detected"/*O*/);
         }
         if (policy.has(FLAG_ANTI_TAMPERING) && !verifyCriticalApkIntegrity(context, policy.integrityEntries)) {
-            crashWithReason("APK tampering detected");
+            crashWithReason(/*O*/"APK tampering detected"/*O*/);
         }
         if (policy.has(FLAG_SIGNATURE_PINNING)) {
             final String expectedCert = policy.pinnedCertSha256;
             if (!expectedCert.isEmpty() && !"UNSIGNED".equalsIgnoreCase(expectedCert)) {
                 if (!verifySigningCert(context, expectedCert)) {
-                    crashWithReason("APK signature mismatch");
+                    crashWithReason(/*O*/"APK signature mismatch"/*O*/);
                 }
             }
         }
@@ -196,45 +211,49 @@ public final class DsProGuardProvider extends ContentProvider {
                 while (true) {
                     if (cycle > 0) {
                         try {
-                            Thread.sleep(2500L);
+                            long sleepMs = (cycle < 20) ? 150L : 600L;
+                            Thread.sleep(sleepMs);
                         } catch (InterruptedException ignored) {
                             return;
                         }
                     }
                     try {
+                        boolean deepScan = (cycle % 4 == 0);
                         if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
-                            triggerMainCrash(mainHandler, "Debugger attached at runtime");
+                            triggerMainCrash(mainHandler, /*O*/"Debugger attached at runtime"/*O*/);
                             return;
                         }
-                        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(appContext)) {
-                            triggerMainCrash(mainHandler, "Runtime memory / DEX dump blocked");
+                        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(appContext, deepScan)) {
+                            triggerMainCrash(mainHandler, /*O*/"Runtime memory / DEX dump blocked"/*O*/);
                             return;
                         }
-                        if (policy.has(FLAG_DETECT_XPOSED) && isHookingFrameworkPresent()) {
-                            triggerMainCrash(mainHandler, "Runtime hooking framework detected");
+                        if (policy.has(FLAG_DETECT_XPOSED) && (deepScan ? isHookingFrameworkPresent() : (isHookingClassPresent() || hasHookedSystemMethods()))) {
+                            triggerMainCrash(mainHandler, /*O*/"Runtime hooking framework detected"/*O*/);
                             return;
                         }
-                        if (policy.has(FLAG_ANTI_TAMPERING) && (cycle % 8 == 0)) {
+                        if (policy.has(FLAG_ANTI_TAMPERING) && (cycle % 24 == 0)) {
                             if (!verifyApkIntegrity(appContext, policy.integrityEntries)) {
-                                triggerMainCrash(mainHandler, "APK tampering detected");
+                                triggerMainCrash(mainHandler, /*O*/"APK tampering detected"/*O*/);
                                 return;
                             }
                         }
                     } catch (SecurityException se) {
-                        triggerMainCrash(mainHandler, se.getMessage() != null ? se.getMessage() : "Security violation");
+                        triggerMainCrash(mainHandler, se.getMessage() != null ? se.getMessage() : /*O*/"Security violation"/*O*/);
                         return;
                     } catch (Throwable ignored) {
                     }
                     cycle++;
                 }
             }
-        }, "dspro-guard-mon");
+        }, /*O*/"dspro-guard-mon"/*O*/);
         t.setDaemon(true);
         t.start();
     }
 
     private static void triggerMainCrash(Handler mainHandler, final String reason) {
-        final String fullMsg = reason.startsWith("DS PRO Protection:") ? reason : "DS PRO Protection: " + reason;
+        final String fullMsg = reason.startsWith(/*O*/"DS PRO Protection:"/*O*/)
+            ? reason
+            : /*O*/"DS PRO Protection: "/*O*/ + reason;
         Log.e(TAG, fullMsg);
         mainHandler.postAtFrontOfQueue(new Runnable() {
             @Override
@@ -242,6 +261,11 @@ public final class DsProGuardProvider extends ContentProvider {
                 throw new SecurityException(fullMsg);
             }
         });
+        try {
+            Thread.sleep(100L);
+        } catch (InterruptedException ignored) {
+        }
+        Process.killProcess(Process.myPid());
     }
 
     private static GuardPolicy readEncryptedPolicy(Context context) {
@@ -264,7 +288,7 @@ public final class DsProGuardProvider extends ContentProvider {
         }
 
         if (blob.length <= 28) {
-            crashWithReason("Security policy tampered");
+            crashWithReason(/*O*/"Security policy tampered"/*O*/);
             return null;
         }
 
@@ -275,7 +299,7 @@ public final class DsProGuardProvider extends ContentProvider {
             System.arraycopy(blob, 16, iv, 0, 12);
             String saltHex = toLowerHex(salt);
             keyBytes = MessageDigest.getInstance("SHA-256").digest(
-                (pkg + ":DSPRO_GCFG_KEY:" + saltHex).getBytes(StandardCharsets.UTF_8)
+                (pkg + /*O*/":DSPRO_GCFG_KEY:"/*O*/ + saltHex).getBytes(StandardCharsets.UTF_8)
             );
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(
@@ -287,7 +311,7 @@ public final class DsProGuardProvider extends ContentProvider {
             String text = new String(plain, StandardCharsets.UTF_8);
             String[] lines = text.split("\n");
             if (lines.length < 3) {
-                crashWithReason("Security policy tampered");
+                crashWithReason(/*O*/"Security policy tampered"/*O*/);
                 return null;
             }
             int flags = Integer.parseInt(lines[0].trim());
@@ -304,7 +328,7 @@ public final class DsProGuardProvider extends ContentProvider {
         } catch (SecurityException se) {
             throw se;
         } catch (Throwable t) {
-            crashWithReason("Security policy tampered");
+            crashWithReason(/*O*/"Security policy tampered"/*O*/);
             return null;
         } finally {
             wipe(blob);
@@ -328,99 +352,218 @@ public final class DsProGuardProvider extends ContentProvider {
         return sb.toString();
     }
 
-    private static boolean isMemoryDumpDetected(Context context) {
-        if (isDebuggerAttached()) {
+    private static boolean isMemoryDumpDetected(Context context, boolean deepScan) {
+        if (isDebuggerAttached() || hasHookedSystemMethods() || hasSuspiciousOpenFds()) {
             return true;
+        }
+        if (hasSuspiciousThreadNames(
+            /*O*/"gum-js-loop"/*O*/,
+            /*O*/"pool-frida"/*O*/,
+            /*O*/"linjector"/*O*/,
+            /*O*/"blackdex"/*O*/,
+            /*O*/"fupk3"/*O*/,
+            /*O*/"dumpdex"/*O*/
+        )) {
+            return true;
+        }
+        if (!deepScan) {
+            return false;
         }
         if (context != null) {
             String apkPath = safeLower(context.getPackageCodePath());
-            if (apkPath.contains("/data/data/")
-                || apkPath.contains("/data/user/")
-                || apkPath.contains("/sdcard/")
-                || apkPath.contains("/storage/emulated/")
-                || apkPath.contains("/virtual/")
-                || apkPath.contains("blackbox")
-                || apkPath.contains("blackdex")
-                || apkPath.contains("sandvxposed")) {
+            if (apkPath.contains(/*O*/"/data/data/"/*O*/)
+                || apkPath.contains(/*O*/"/data/user/"/*O*/)
+                || apkPath.contains(/*O*/"/sdcard/"/*O*/)
+                || apkPath.contains(/*O*/"/storage/emulated/"/*O*/)
+                || apkPath.contains(/*O*/"/virtual/"/*O*/)
+                || apkPath.contains(/*O*/"blackbox"/*O*/)
+                || apkPath.contains(/*O*/"blackdex"/*O*/)
+                || apkPath.contains(/*O*/"sandvxposed"/*O*/)
+                || apkPath.contains(/*O*/"dualspace"/*O*/)
+                || apkPath.contains(/*O*/"virtualapp"/*O*/)
+                || apkPath.contains(/*O*/"cloneapp"/*O*/)) {
                 return true;
             }
             try {
                 String filesDir = safeLower(context.getFilesDir().getAbsolutePath());
-                if (filesDir.contains("/virtual/")
-                    || filesDir.contains("blackbox")
-                    || filesDir.contains("blackdex")
-                    || filesDir.contains("sandvxposed")
-                    || filesDir.contains("dualspace")) {
+                if (filesDir.contains(/*O*/"/virtual/"/*O*/)
+                    || filesDir.contains(/*O*/"blackbox"/*O*/)
+                    || filesDir.contains(/*O*/"blackdex"/*O*/)
+                    || filesDir.contains(/*O*/"sandvxposed"/*O*/)
+                    || filesDir.contains(/*O*/"dualspace"/*O*/)
+                    || filesDir.contains(/*O*/"virtualapp"/*O*/)
+                    || filesDir.contains(/*O*/"parallel"/*O*/)
+                    || filesDir.contains(/*O*/"cloneapp"/*O*/)) {
                     return true;
                 }
             } catch (Throwable ignored) {
             }
+            if (!Process.isIsolated()) {
+                String cmdline = readCmdline();
+                if (!cmdline.isEmpty()) {
+                    String lowerCmd = cmdline.toLowerCase(Locale.US);
+                    if (lowerCmd.contains(/*O*/"blackdex"/*O*/)
+                        || lowerCmd.contains(/*O*/"blackbox"/*O*/)
+                        || lowerCmd.contains(/*O*/"virtualapp"/*O*/)
+                        || lowerCmd.contains(/*O*/"io.va."/*O*/)
+                        || lowerCmd.contains(/*O*/"com.lody"/*O*/)
+                        || lowerCmd.contains(/*O*/"sandvxposed"/*O*/)
+                        || lowerCmd.contains(/*O*/"dualspace"/*O*/)
+                        || lowerCmd.contains(/*O*/"parallel"/*O*/)
+                        || lowerCmd.contains(/*O*/"cloneapp"/*O*/)) {
+                        return true;
+                    }
+                    String pkg = context.getPackageName();
+                    if (pkg != null && !pkg.isEmpty() && !cmdline.startsWith(pkg)) {
+                        if (!mapsContainsPackageApk(pkg)) {
+                            return true;
+                        }
+                    }
+                }
+            }
         }
-        if (hasHookedSystemMethods()) {
+        if (hasHookedInstrumentation()) {
             return true;
         }
-        if (containsInFile(
-            "/proc/self/maps",
-            "blackdex",
-            "blackbox",
-            "dumpdex",
-            "fupk3",
-            "libfart",
-            "fart_art",
-            "youpk",
-            "dexdump",
-            "drizzledumper",
-            "frida-agent",
-            "frida-gadget",
-            "re.frida",
-            "memfd:frida",
-            "linjector",
-            "sandhook",
-            "libpine",
-            "libepic",
-            "libwhale",
-            "libdobby",
-            "libsubstrate",
-            "zygisk",
-            "lspd",
-            "lsposed",
-            "edxposed",
-            "libriru"
-        )) {
+        if (hasDumperInMaps()) {
             return true;
         }
-        if (hasSuspiciousThreadNames(
-            "gum-js-loop",
-            "pool-frida",
-            "linjector",
-            "blackdex",
-            "fupk3"
-        )) {
+        if (containsFridaListeningPort(/*O*/"/proc/net/tcp"/*O*/)
+            || containsFridaListeningPort(/*O*/"/proc/net/tcp6"/*O*/)
+            || containsInFile(/*O*/"/proc/net/unix"/*O*/, /*O*/"frida"/*O*/, /*O*/"linjector"/*O*/, /*O*/"hluda"/*O*/, /*O*/"florida"/*O*/, /*O*/"blackdex"/*O*/)) {
             return true;
         }
-        if (hasSuspiciousOpenFds()) {
-            return true;
+        try {
+            Map<Thread, StackTraceElement[]> all = Thread.getAllStackTraces();
+            for (StackTraceElement[] frames : all.values()) {
+                if (hasDumperFrames(frames)) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
         }
-        // Check Frida listening ports 27042 (0x69A2) and 27043 (0x69A3) in /proc/net/tcp*
-        if (containsFridaListeningPort("/proc/net/tcp")
-            || containsFridaListeningPort("/proc/net/tcp6")
-            || containsInFile("/proc/net/unix", "frida", "linjector", "blackdex")) {
-            return true;
-        }
-        for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
+        return false;
+    }
+
+    private static boolean hasDumperFrames(StackTraceElement[] frames) {
+        if (frames == null) return false;
+        for (StackTraceElement el : frames) {
             String cls = safeLower(el.getClassName());
-            if (cls.contains("blackdex")
-                || cls.contains("blackbox")
-                || cls.contains("dumpdex")
-                || cls.contains("fupk")
-                || cls.contains("libfart")
-                || cls.contains("fart_art")
-                || cls.contains("cn.mik.fart")
-                || cls.contains("youpk")
-                || cls.contains("dexdump")
-                || cls.contains("frida")) {
+            if (cls.contains(/*O*/"blackdex"/*O*/)
+                || cls.contains(/*O*/"blackbox"/*O*/)
+                || cls.contains(/*O*/"dumpdex"/*O*/)
+                || cls.contains(/*O*/"fupk"/*O*/)
+                || cls.contains(/*O*/"libfart"/*O*/)
+                || cls.contains(/*O*/"fart_art"/*O*/)
+                || cls.contains(/*O*/"cn.mik.fart"/*O*/)
+                || cls.contains(/*O*/"youpk"/*O*/)
+                || cls.contains(/*O*/"dexdump"/*O*/)
+                || cls.contains(/*O*/"top.niunaijun"/*O*/)
+                || cls.contains(/*O*/"com.lody"/*O*/)
+                || cls.contains(/*O*/"frida"/*O*/)) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    private static String readCmdline() {
+        try (InputStream in = new FileInputStream(/*O*/"/proc/self/cmdline"/*O*/)) {
+            byte[] buf = new byte[256];
+            int n = in.read(buf);
+            if (n <= 0) return "";
+            int end = 0;
+            while (end < n && buf[end] != 0) end++;
+            return new String(buf, 0, end, StandardCharsets.UTF_8).trim();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static boolean mapsContainsPackageApk(String packageName) {
+        String lowerPkg = packageName.toLowerCase(Locale.US);
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String lower = line.toLowerCase(Locale.US);
+                if (lower.contains(lowerPkg) && lower.contains(".apk")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean hasHookedInstrumentation() {
+        try {
+            Class<?> atCls = Class.forName(/*O*/"android.app.ActivityThread"/*O*/);
+            Method curAt = atCls.getDeclaredMethod(/*O*/"currentActivityThread"/*O*/);
+            Object at = curAt.invoke(null);
+            if (at != null) {
+                Field f = atCls.getDeclaredField("mInstrumentation");
+                f.setAccessible(true);
+                Object inst = f.get(at);
+                if (inst != null) {
+                    String cls = safeLower(inst.getClass().getName());
+                    if (cls.contains(/*O*/"blackbox"/*O*/)
+                        || cls.contains(/*O*/"blackdex"/*O*/)
+                        || cls.contains(/*O*/"virtual"/*O*/)
+                        || cls.contains(/*O*/"lody"/*O*/)
+                        || cls.contains(/*O*/"sandhook"/*O*/)
+                        || cls.contains(/*O*/"xposed"/*O*/)
+                        || cls.contains(/*O*/"lsposed"/*O*/)
+                        || cls.contains(/*O*/"dualspace"/*O*/)
+                        || cls.contains(/*O*/"clone"/*O*/)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean hasDumperInMaps() {
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String lower = line.toLowerCase(Locale.US);
+                if (lower.contains(/*O*/"blackdex"/*O*/)
+                    || lower.contains(/*O*/"blackbox"/*O*/)
+                    || lower.contains(/*O*/"libnmmvm"/*O*/)
+                    || lower.contains(/*O*/"dumpdex"/*O*/)
+                    || lower.contains(/*O*/"fupk3"/*O*/)
+                    || lower.contains(/*O*/"libfart"/*O*/)
+                    || lower.contains(/*O*/"fart_art"/*O*/)
+                    || lower.contains(/*O*/"youpk"/*O*/)
+                    || lower.contains(/*O*/"dexdump"/*O*/)
+                    || lower.contains(/*O*/"drizzledumper"/*O*/)
+                    || lower.contains(/*O*/"dexextractor"/*O*/)
+                    || lower.contains(/*O*/"frida-agent"/*O*/)
+                    || lower.contains(/*O*/"frida-gadget"/*O*/)
+                    || lower.contains(/*O*/"re.frida"/*O*/)
+                    || lower.contains(/*O*/"memfd:frida"/*O*/)
+                    || lower.contains(/*O*/"hluda"/*O*/)
+                    || lower.contains(/*O*/"florida"/*O*/)
+                    || lower.contains(/*O*/"linjector"/*O*/)
+                    || lower.contains(/*O*/"sandhook"/*O*/)
+                    || lower.contains(/*O*/"libpine"/*O*/)
+                    || lower.contains(/*O*/"libepic"/*O*/)
+                    || lower.contains(/*O*/"libwhale"/*O*/)
+                    || lower.contains(/*O*/"libdobby"/*O*/)
+                    || lower.contains(/*O*/"libsubstrate"/*O*/)
+                    || lower.contains(/*O*/"zygisk"/*O*/)
+                    || lower.contains(/*O*/"shamiko"/*O*/)
+                    || lower.contains(/*O*/"lspd"/*O*/)
+                    || lower.contains(/*O*/"lsposed"/*O*/)
+                    || lower.contains(/*O*/"edxposed"/*O*/)
+                    || lower.contains(/*O*/"libriru"/*O*/)
+                    || (lower.contains(/*O*/"/data/local/tmp/"/*O*/) && lower.contains(".so"))) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
         }
         return false;
     }
@@ -431,6 +574,10 @@ public final class DsProGuardProvider extends ContentProvider {
             if (Modifier.isNative(doFinalMethod.getModifiers())) {
                 return true;
             }
+            Method digestMethod = MessageDigest.class.getDeclaredMethod("digest", byte[].class);
+            if (Modifier.isNative(digestMethod.getModifiers())) {
+                return true;
+            }
             Method loadClassMethod = ClassLoader.class.getDeclaredMethod("loadClass", String.class);
             if (Modifier.isNative(loadClassMethod.getModifiers())) {
                 return true;
@@ -439,6 +586,15 @@ public final class DsProGuardProvider extends ContentProvider {
             if (Modifier.isNative(findClassMethod.getModifiers())) {
                 return true;
             }
+            Method inflateMethod = Inflater.class.getDeclaredMethod("inflate", byte[].class);
+            if (Modifier.isNative(inflateMethod.getModifiers())) {
+                return true;
+            }
+            for (Constructor<?> ctor : InMemoryDexClassLoader.class.getDeclaredConstructors()) {
+                if (Modifier.isNative(ctor.getModifiers())) {
+                    return true;
+                }
+            }
         } catch (Throwable ignored) {
         }
         return false;
@@ -446,19 +602,30 @@ public final class DsProGuardProvider extends ContentProvider {
 
     private static boolean hasSuspiciousOpenFds() {
         try {
-            File fdDir = new File("/proc/self/fd");
+            File fdDir = new File(/*O*/"/proc/self/fd"/*O*/);
             File[] fds = fdDir.listFiles();
             if (fds == null) {
                 return false;
             }
             for (File fd : fds) {
                 String path = safeLower(fd.getCanonicalPath());
-                if (path.contains("frida")
-                    || path.contains("blackdex")
-                    || path.contains("dumpdex")
-                    || path.contains("fupk")
-                    || path.contains("libfart")
-                    || path.contains("youpk")) {
+                if (path.contains(/*O*/"frida"/*O*/)
+                    || path.contains(/*O*/"hluda"/*O*/)
+                    || path.contains(/*O*/"florida"/*O*/)
+                    || path.contains(/*O*/"blackdex"/*O*/)
+                    || path.contains(/*O*/"blackbox"/*O*/)
+                    || path.contains(/*O*/"dumpdex"/*O*/)
+                    || path.contains(/*O*/"fupk"/*O*/)
+                    || path.contains(/*O*/"libfart"/*O*/)
+                    || path.contains(/*O*/"youpk"/*O*/)
+                    || path.contains(/*O*/"drizzledumper"/*O*/)) {
+                    return true;
+                }
+                if (path.endsWith(".dex")
+                    && (path.contains(/*O*/"/sdcard/"/*O*/)
+                        || path.contains(/*O*/"/storage/emulated/"/*O*/)
+                        || path.contains(/*O*/"/data/local/tmp/"/*O*/)
+                        || path.contains(/*O*/"/dump"/*O*/))) {
                     return true;
                 }
             }
@@ -469,7 +636,7 @@ public final class DsProGuardProvider extends ContentProvider {
 
     private static boolean hasSuspiciousThreadNames(String... needles) {
         try {
-            File taskDir = new File("/proc/self/task");
+            File taskDir = new File(/*O*/"/proc/self/task"/*O*/);
             File[] tasks = taskDir.listFiles();
             if (tasks == null) {
                 return false;
@@ -501,18 +668,18 @@ public final class DsProGuardProvider extends ContentProvider {
             return true;
         }
         String[] paths = {
-            "/system/app/Superuser.apk",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/data/local/xbin/su",
-            "/data/local/bin/su",
-            "/system/sd/xbin/su",
-            "/system/bin/failsafe/su",
-            "/data/local/su",
-            "/su/bin/su",
-            "/vendor/bin/su",
-            "/magisk/.core/bin/su"
+            /*O*/"/system/app/Superuser.apk"/*O*/,
+            /*O*/"/sbin/su"/*O*/,
+            /*O*/"/system/bin/su"/*O*/,
+            /*O*/"/system/xbin/su"/*O*/,
+            /*O*/"/data/local/xbin/su"/*O*/,
+            /*O*/"/data/local/bin/su"/*O*/,
+            /*O*/"/system/sd/xbin/su"/*O*/,
+            /*O*/"/system/bin/failsafe/su"/*O*/,
+            /*O*/"/data/local/su"/*O*/,
+            /*O*/"/su/bin/su"/*O*/,
+            /*O*/"/vendor/bin/su"/*O*/,
+            /*O*/"/magisk/.core/bin/su"/*O*/
         };
         for (String path : paths) {
             if (new File(path).exists()) {
@@ -522,12 +689,12 @@ public final class DsProGuardProvider extends ContentProvider {
         String pathEnv = System.getenv("PATH");
         if (pathEnv != null) {
             for (String dir : pathEnv.split(":")) {
-                if (new File(dir, "su").exists() || new File(dir, "magisk").exists()) {
+                if (new File(dir, "su").exists() || new File(dir, /*O*/"magisk"/*O*/).exists()) {
                     return true;
                 }
             }
         }
-        return containsInFile("/proc/mounts", "magisk", "kernelsu", "apatch");
+        return containsInFile(/*O*/"/proc/mounts"/*O*/, /*O*/"magisk"/*O*/, /*O*/"kernelsu"/*O*/, /*O*/"apatch"/*O*/);
     }
 
     private static boolean isEmulator() {
@@ -558,14 +725,14 @@ public final class DsProGuardProvider extends ContentProvider {
             return true;
         }
 
-        return new File("/dev/socket/qemud").exists()
-            || new File("/dev/qemu_pipe").exists()
-            || new File("/system/lib/libc_malloc_debug_qemu.so").exists();
+        return new File(/*O*/"/dev/socket/qemud"/*O*/).exists()
+            || new File(/*O*/"/dev/qemu_pipe"/*O*/).exists()
+            || new File(/*O*/"/system/lib/libc_malloc_debug_qemu.so"/*O*/).exists();
     }
 
     private static boolean isHookingClassPresent() {
         try {
-            Class.forName("de.robv.android.xposed.XposedBridge");
+            Class.forName(/*O*/"de.robv.android.xposed.XposedBridge"/*O*/);
             return true;
         } catch (Throwable ignored) {
         }
@@ -579,30 +746,45 @@ public final class DsProGuardProvider extends ContentProvider {
 
         for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
             String cls = safeLower(el.getClassName());
-            if (cls.contains("xposed")
-                || cls.contains("lsposed")
-                || cls.contains("lsphooker")
-                || cls.contains("edhooker")
-                || cls.contains("sandhook")
-                || cls.contains("substrate")
-                || cls.contains("frida")) {
+            if (cls.contains(/*O*/"xposed"/*O*/)
+                || cls.contains(/*O*/"lsposed"/*O*/)
+                || cls.contains(/*O*/"lsphooker"/*O*/)
+                || cls.contains(/*O*/"edhooker"/*O*/)
+                || cls.contains(/*O*/"sandhook"/*O*/)
+                || cls.contains(/*O*/"substrate"/*O*/)
+                || cls.contains(/*O*/"frida"/*O*/)) {
                 return true;
             }
         }
 
-        return containsInFile("/proc/self/maps", "xposed", "lsposed", "lspd", "edxposed", "frida-agent", "frida-gadget", "re.frida", "memfd:frida", "linjector", "libsubstrate", "zygisk")
-            || hasSuspiciousThreadNames("gum-js-loop", "pool-frida", "linjector");
+        return containsInFile(
+            /*O*/"/proc/self/maps"/*O*/,
+            /*O*/"xposed"/*O*/,
+            /*O*/"lsposed"/*O*/,
+            /*O*/"lspd"/*O*/,
+            /*O*/"edxposed"/*O*/,
+            /*O*/"frida-agent"/*O*/,
+            /*O*/"frida-gadget"/*O*/,
+            /*O*/"re.frida"/*O*/,
+            /*O*/"memfd:frida"/*O*/,
+            /*O*/"hluda"/*O*/,
+            /*O*/"florida"/*O*/,
+            /*O*/"linjector"/*O*/,
+            /*O*/"libsubstrate"/*O*/,
+            /*O*/"zygisk"/*O*/
+        ) || hasSuspiciousThreadNames(/*O*/"gum-js-loop"/*O*/, /*O*/"pool-frida"/*O*/, /*O*/"linjector"/*O*/);
     }
 
     private static boolean isDebuggerAttached() {
         if (Debug.isDebuggerConnected() || Debug.waitingForDebugger()) {
             return true;
         }
-        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"))) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/status"/*O*/))) {
             String line;
+            String prefix = /*O*/"TracerPid:"/*O*/;
             while ((line = reader.readLine()) != null) {
-                if (line.startsWith("TracerPid:")) {
-                    String val = line.substring("TracerPid:".length()).trim();
+                if (line.startsWith(prefix)) {
+                    String val = line.substring(prefix.length()).trim();
                     if (!"0".equals(val) && !val.isEmpty()) {
                         return true;
                     }
@@ -760,7 +942,7 @@ public final class DsProGuardProvider extends ContentProvider {
     }
 
     private static void crashWithReason(String reason) {
-        final String message = "DS PRO Protection: " + reason;
+        final String message = /*O*/"DS PRO Protection: "/*O*/ + reason;
         Log.e(TAG, message);
         throw new SecurityException(message);
     }

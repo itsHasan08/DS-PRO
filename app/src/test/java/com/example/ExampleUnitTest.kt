@@ -91,30 +91,57 @@ class ExampleUnitTest {
         val containerName = ApkProtectionProcessor.coreContainerAssetPath(packageName)
         val entry = zip.getEntry(containerName)
             ?: throw AssertionError("Missing encrypted DS PRO container $containerName")
+        val coreDexBytes = zip.getInputStream(zip.getEntry("classes.dex")).use { it.readBytes() }
+        val sha256 = MessageDigest.getInstance("SHA-256")
+        val coreDexSha256 = sha256.digest(coreDexBytes)
+        val guardEntry = zip.getEntry(ApkProtectionProcessor.guardConfigAssetPath(packageName))
+        val guardDexSha256 = if (guardEntry != null) {
+            val gBytes = zip.getInputStream(zip.getEntry("classes2.dex")).use { it.readBytes() }
+            sha256.reset()
+            sha256.digest(gBytes)
+        } else {
+            ByteArray(32)
+        }
+
         zip.getInputStream(entry).use { rawIn ->
             java.io.DataInputStream(rawIn).use { dis ->
                 val salt = ByteArray(16).also { dis.readFully(it) }
+                val maskedPepper = ByteArray(32).also { dis.readFully(it) }
                 val metaIv = ByteArray(12).also { dis.readFully(it) }
                 val metaLen = dis.readInt()
                 val metaCipher = ByteArray(metaLen).also { dis.readFully(it) }
 
-                val saltHex = salt.joinToString("") { "%02x".format(it) }
-                val metaCipherObj = Cipher.getInstance("AES/GCM/NoPadding")
-                var isV4 = true
-                val metaPlain = try {
-                    val metaKey = MessageDigest.getInstance("SHA-256").digest(
-                        "$packageName:DSPRO_CORE_V4:$saltHex".toByteArray(Charsets.UTF_8),
-                    )
-                    metaCipherObj.init(Cipher.DECRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
-                    String(metaCipherObj.doFinal(metaCipher), Charsets.UTF_8)
-                } catch (_: Throwable) {
-                    isV4 = false
-                    val metaKey = MessageDigest.getInstance("SHA-256").digest(
-                        "$packageName:DSPRO_CORE_V3:$saltHex".toByteArray(Charsets.UTF_8),
-                    )
-                    metaCipherObj.init(Cipher.DECRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
-                    String(metaCipherObj.doFinal(metaCipher), Charsets.UTF_8)
+                val pkgBytes = packageName.toByteArray(Charsets.UTF_8)
+                sha256.reset()
+                sha256.update(pkgBytes)
+                sha256.update(":V5M:".toByteArray(Charsets.UTF_8))
+                sha256.update(salt)
+                sha256.update(coreDexSha256)
+                sha256.update(guardDexSha256)
+                val bindingMask = sha256.digest()
+                val pepper = ByteArray(32) { i ->
+                    (maskedPepper[i].toInt() xor bindingMask[i].toInt()).toByte()
                 }
+
+                sha256.reset()
+                sha256.update(pepper)
+                sha256.update(salt)
+                sha256.update(coreDexSha256)
+                sha256.update(guardDexSha256)
+                sha256.update(pkgBytes)
+                var metaKey = sha256.digest()
+                for (round in 0 until 1024) {
+                    sha256.reset()
+                    sha256.update(metaKey)
+                    sha256.update(pepper)
+                    sha256.update((round and 0xFF).toByte())
+                    metaKey = sha256.digest()
+                }
+
+                val metaCipherObj = Cipher.getInstance("AES/GCM/NoPadding")
+                metaCipherObj.init(Cipher.DECRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
+                val metaPlain = String(metaCipherObj.doFinal(metaCipher), Charsets.UTF_8)
+
                 val lines = metaPlain.split("\n")
                 val dexCount = lines[0].trim().toInt()
                 val aesKeyHex = lines[3].trim()
@@ -122,21 +149,17 @@ class ExampleUnitTest {
                     ((Character.digit(aesKeyHex[i * 2], 16) shl 4) +
                         Character.digit(aesKeyHex[i * 2 + 1], 16)).toByte()
                 }
-                val sha256 = MessageDigest.getInstance("SHA-256")
                 val isCompressed = lines.size >= 6 && lines[5].trim() == "Z1"
                 val dexList = (0 until dexCount).map { idx ->
                     val iv = ByteArray(12).also { dis.readFully(it) }
                     val cLen = dis.readInt()
                     val enc = ByteArray(cLen).also { dis.readFully(it) }
-                    val entryKeySpec = if (isV4) {
-                        val ivHex = iv.joinToString("") { "%02x".format(it) }
-                        sha256.reset()
-                        sha256.update(aesKey)
-                        sha256.update(":DEX:$idx:$ivHex".toByteArray(Charsets.UTF_8))
-                        SecretKeySpec(sha256.digest(), "AES")
-                    } else {
-                        SecretKeySpec(aesKey, "AES")
-                    }
+                    val ivHex = iv.joinToString("") { "%02x".format(it) }
+                    sha256.reset()
+                    sha256.update(aesKey)
+                    sha256.update(":DEX:$idx:$ivHex".toByteArray(Charsets.UTF_8))
+                    sha256.update(coreDexSha256)
+                    val entryKeySpec = SecretKeySpec(sha256.digest(), "AES")
                     val plain = Cipher.getInstance("AES/GCM/NoPadding").run {
                         init(Cipher.DECRYPT_MODE, entryKeySpec, GCMParameterSpec(128, iv))
                         doFinal(enc)
@@ -278,6 +301,12 @@ class ExampleUnitTest {
     @Test
     fun `dex patcher strips source file and debug info and updates checksums`() {
         val dex = buildSyntheticDex(withDebugInfo = true)
+        // Put a valid debug_info_item at offset 200 (line_start=1, params=0, DBG_END_SEQUENCE=0x00)
+        dex[200] = 1
+        dex[201] = 0
+        dex[202] = 0
+        DexPatcher.recomputeDexChecksums(dex)
+
         val (stripped, stats) = DexPatcher.stripDebugInfo(dex)
 
         assertEquals(1, stats.sourceFilesCleared)
@@ -286,6 +315,9 @@ class ExampleUnitTest {
         val buf = ByteBuffer.wrap(stripped).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(-1, buf.getInt(112 + 16))
         assertEquals(0, buf.getInt(160 + 8))
+        assertEquals(0, stripped[200].toInt())
+        assertEquals(0, stripped[201].toInt())
+        assertEquals(0, stripped[202].toInt())
 
         val (_, secondStats) = DexPatcher.stripDebugInfo(stripped)
         assertEquals(0, secondStats.sourceFilesCleared)
@@ -457,9 +489,17 @@ class ExampleUnitTest {
         assertTrue(DexPatcher.containsAsciiMarker(guardBytes, "Lcom/dspro/guard/DsProGuardProvider;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProComponentFactory;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProApplication;"))
+        assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProHostClassLoader;"))
         assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/stub/StubApp;"))
         assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "com/dspro/dpt"))
         assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "com/dspro/dpt"))
+        // Verify compile-time XOR obfuscation hid sensitive runtime strings from plaintext DEX inspection
+        assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "blackdex"))
+        assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "/proc/self/maps"))
+        assertFalse(DexPatcher.containsAsciiMarker(coreBytes, ":V5M:"))
+        assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "blackdex"))
+        assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "/proc/self/maps"))
+        assertFalse(DexPatcher.containsAsciiMarker(guardBytes, ":DSPRO_GCFG_KEY:"))
 
         val tempDir = Files.createTempDirectory("dspro_real_apk_core_test").toFile()
         try {

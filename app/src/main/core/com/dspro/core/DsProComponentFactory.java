@@ -38,22 +38,23 @@ public final class DsProComponentFactory extends AppComponentFactory {
                 cl
             );
             DsProCoreLoader.wipeBuffers(bundle.dexBuffers);
+            ClassLoader hostShell = new DsProHostClassLoader(librarySearchPath, cl, memLoader);
 
             AppComponentFactory origFactory = null;
             if (!bundle.metadata.originalFactoryClass.isEmpty()
                 && !DsProComponentFactory.class.getName().equals(bundle.metadata.originalFactoryClass)) {
                 try {
-                    origFactory = (AppComponentFactory) memLoader
+                    origFactory = (AppComponentFactory) hostShell
                         .loadClass(bundle.metadata.originalFactoryClass)
                         .getDeclaredConstructor()
                         .newInstance();
                 } catch (Throwable ignored) {
                 }
             }
-            ClassLoader finalLoader = memLoader;
+            ClassLoader finalLoader = hostShell;
             if (origFactory != null && Build.VERSION.SDK_INT >= 29) {
                 try {
-                    ClassLoader delegated = origFactory.instantiateClassLoader(memLoader, aInfo);
+                    ClassLoader delegated = origFactory.instantiateClassLoader(hostShell, aInfo);
                     if (delegated != null) {
                         finalLoader = delegated;
                     }
@@ -61,6 +62,12 @@ public final class DsProComponentFactory extends AppComponentFactory {
                 }
             }
             DsProCoreLoader.markInitialized(aInfo.packageName, bundle.metadata, finalLoader, origFactory);
+            DsProCoreLoader.startCoreWatchdog(
+                aInfo.sourceDir,
+                aInfo.dataDir,
+                aInfo.packageName,
+                bundle.metadata.antiDumpEnabled
+            );
             Thread.currentThread().setContextClassLoader(finalLoader);
             return finalLoader;
         }

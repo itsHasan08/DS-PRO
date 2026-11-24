@@ -476,6 +476,14 @@ class ApkProtectionProcessor(
                         require(sortedOriginalDex.isNotEmpty()) { "No classes.dex found to encrypt." }
 
                         val rng = SecureRandom()
+                        val sha = MessageDigest.getInstance("SHA-256")
+                        val coreDexSha256 = sha.digest(coreDexBytes)
+                        val guardDexSha256 = if (config.requiresRuntimeGuard && guardDexBytes != null) {
+                            sha.reset()
+                            sha.digest(guardDexBytes)
+                        } else {
+                            ByteArray(32)
+                        }
                         val coreContainerBytes = buildEncryptedCoreContainer(
                             rng = rng,
                             packageName = effectivePackageName,
@@ -483,6 +491,8 @@ class ApkProtectionProcessor(
                             originalFactoryClass = originalFactoryClass,
                             requireGuard = config.requiresRuntimeGuard,
                             antiDumpEnabled = config.antiDump,
+                            coreDexSha256 = coreDexSha256,
+                            guardDexSha256 = guardDexSha256,
                             dexPayloads = sortedOriginalDex.map { it.second },
                         )
                         if (writeZipBytes(countingOut, zipOut, written, coreAssetName, coreContainerBytes, keepStored = true)) {
@@ -565,15 +575,44 @@ class ApkProtectionProcessor(
             originalFactoryClass: String,
             requireGuard: Boolean,
             antiDumpEnabled: Boolean,
+            coreDexSha256: ByteArray,
+            guardDexSha256: ByteArray,
             dexPayloads: List<ByteArray>,
         ): ByteArray {
             val aesKey = ByteArray(32).also { rng.nextBytes(it) }
             val salt = ByteArray(16).also { rng.nextBytes(it) }
-            val saltHex = salt.joinToString("") { "%02x".format(it) }
+            val pepper = ByteArray(32).also { rng.nextBytes(it) }
+            val pkgBytes = packageName.toByteArray(Charsets.UTF_8)
 
-            val metaKey = MessageDigest.getInstance("SHA-256").digest(
-                "$packageName:DSPRO_CORE_V4:$saltHex".toByteArray(Charsets.UTF_8),
-            )
+            val sha256 = MessageDigest.getInstance("SHA-256")
+            sha256.update(pkgBytes)
+            sha256.update(":V5M:".toByteArray(Charsets.UTF_8))
+            sha256.update(salt)
+            sha256.update(coreDexSha256)
+            sha256.update(guardDexSha256)
+            val bindingMask = sha256.digest()
+            val maskedPepper = ByteArray(32) { i ->
+                (pepper[i].toInt() xor bindingMask[i].toInt()).toByte()
+            }
+            bindingMask.fill(0)
+
+            sha256.reset()
+            sha256.update(pepper)
+            sha256.update(salt)
+            sha256.update(coreDexSha256)
+            sha256.update(guardDexSha256)
+            sha256.update(pkgBytes)
+            var metaKey = sha256.digest()
+            for (round in 0 until 1024) {
+                sha256.reset()
+                sha256.update(metaKey)
+                sha256.update(pepper)
+                sha256.update((round and 0xFF).toByte())
+                metaKey.fill(0)
+                metaKey = sha256.digest()
+            }
+            pepper.fill(0)
+
             val aesKeyHex = aesKey.joinToString("") { "%02x".format(it) }
             val metaPlain = buildString {
                 appendLine(dexPayloads.size)
@@ -595,11 +634,11 @@ class ApkProtectionProcessor(
             val out = ByteArrayOutputStream()
             DataOutputStream(out).use { dos ->
                 dos.write(salt)
+                dos.write(maskedPepper)
                 dos.write(metaIv)
                 dos.writeInt(metaCipher.size)
                 dos.write(metaCipher)
 
-                val sha256 = MessageDigest.getInstance("SHA-256")
                 val iv = ByteArray(12)
                 dexPayloads.forEachIndexed { idx, dexBytes ->
                     val compressedDex = deflateBytes(dexBytes, Deflater.BEST_COMPRESSION)
@@ -608,6 +647,7 @@ class ApkProtectionProcessor(
                     sha256.reset()
                     sha256.update(aesKey)
                     sha256.update(":DEX:$idx:$ivHex".toByteArray(Charsets.UTF_8))
+                    sha256.update(coreDexSha256)
                     val entryKey = sha256.digest()
                     cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(entryKey, "AES"), GCMParameterSpec(128, iv))
                     val cipherText = cipher.doFinal(compressedDex)

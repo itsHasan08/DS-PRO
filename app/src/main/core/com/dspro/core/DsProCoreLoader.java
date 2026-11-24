@@ -6,6 +6,8 @@ import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.os.Build;
 import android.os.Debug;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Process;
 import dalvik.system.BaseDexClassLoader;
 import dalvik.system.InMemoryDexClassLoader;
@@ -17,6 +19,7 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.InputStream;
 import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -25,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.Map;
 import java.util.zip.Inflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -33,9 +37,9 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Decrypts unified AES-256-GCM encrypted DEX container in direct memory,
- * verifies anti-dump/anti-hook/virtual-container environment before decryption,
- * wipes plaintext DEX buffers immediately after ART ClassLoader loading,
+ * Decrypts V5 self-bound AES-256-GCM encrypted DEX container in direct memory,
+ * verifies anti-dump/anti-hook/virtual-container environment before decryption and via a
+ * burst-polling live watchdog, wipes plaintext DEX buffers immediately after ART loading,
  * and enforces guard anti-removal binding without breaking multi-provider init.
  */
 final class DsProCoreLoader {
@@ -72,8 +76,16 @@ final class DsProCoreLoader {
         }
     }
 
-    private static final String CONTAINER_ASSET = "assets/dspro_core.bin";
-    private static final String GUARD_POLICY_ASSET = "assets/dspro_guard.bin";
+    static String _xs(int seed, byte[] data) {
+        byte[] out = new byte[data.length];
+        for (int i = 0; i < data.length; i++) {
+            out[i] = (byte) ((data[i] & 0xFF) ^ ((seed + i * 31) & 0xFF));
+        }
+        return new String(out, StandardCharsets.UTF_8);
+    }
+
+    private static final String CONTAINER_ASSET = /*O*/"assets/dspro_core.bin"/*O*/;
+    private static final String GUARD_POLICY_ASSET = /*O*/"assets/dspro_guard.bin"/*O*/;
     private static final String GUARD_PROVIDER_NAME = "com.dspro.guard.DsProGuardProvider";
 
     private static volatile boolean initialized = false;
@@ -83,6 +95,7 @@ final class DsProCoreLoader {
     private static volatile Object delegateFactory = null;
     private static volatile boolean guardProviderInstantiated = false;
     private static volatile boolean guardBindingVerified = false;
+    private static volatile boolean coreWatchdogStarted = false;
 
     static boolean isInitialized() {
         return initialized;
@@ -116,14 +129,12 @@ final class DsProCoreLoader {
         if (meta == null || !meta.requireGuard || guardProviderInstantiated) {
             return;
         }
-        // Only check once provider registration in loaded ClassLoader is verifiable;
-        // avoids false crashes if an early SDK ContentProvider runs before DsProGuardProvider.
         ClassLoader cl = activeClassLoader;
         if (cl != null) {
             try {
                 Class.forName(GUARD_PROVIDER_NAME, false, cl);
             } catch (ClassNotFoundException e) {
-                throw new SecurityException("DS PRO Protection: Guard integrity compromised");
+                throw new SecurityException(/*O*/"DS PRO Protection: Guard integrity compromised"/*O*/);
             }
         }
     }
@@ -139,6 +150,56 @@ final class DsProCoreLoader {
         activeClassLoader = loader;
         delegateFactory = factory;
         initialized = true;
+    }
+
+    static synchronized void startCoreWatchdog(final String apkPath, final String dataDir, final String packageName, final boolean strictAntiDump) {
+        if (coreWatchdogStarted || Process.isIsolated()) {
+            return;
+        }
+        coreWatchdogStarted = true;
+        final Handler mainHandler = new Handler(Looper.getMainLooper());
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                int cycle = 0;
+                while (true) {
+                    try {
+                        long sleepMs = (cycle < 20) ? 150L : 600L;
+                        Thread.sleep(sleepMs);
+                    } catch (InterruptedException ignored) {
+                        return;
+                    }
+                    try {
+                        String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, (cycle % 4 == 0));
+                        if (threat != null) {
+                            fatalTerminate(mainHandler, threat);
+                            return;
+                        }
+                    } catch (SecurityException se) {
+                        fatalTerminate(mainHandler, se.getMessage() != null ? se.getMessage() : /*O*/"DS PRO Protection: Security violation"/*O*/);
+                        return;
+                    } catch (Throwable ignored) {
+                    }
+                    cycle++;
+                }
+            }
+        }, /*O*/"dspro-core-mon"/*O*/);
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static void fatalTerminate(Handler mainHandler, final String reason) {
+        mainHandler.postAtFrontOfQueue(new Runnable() {
+            @Override
+            public void run() {
+                throw new SecurityException(reason);
+            }
+        });
+        try {
+            Thread.sleep(100L);
+        } catch (InterruptedException ignored) {
+        }
+        Process.killProcess(Process.myPid());
     }
 
     static void wipeBuffers(ByteBuffer[] buffers) {
@@ -165,25 +226,44 @@ final class DsProCoreLoader {
         }
     }
 
-    static void enforcePreDecryptAntiDump(String apkPath, String dataDir, boolean strictAntiDump) {
-        if (!strictAntiDump) {
-            return;
+    static void enforcePreDecryptAntiDump(String apkPath, String dataDir, String packageName, boolean strictAntiDump) {
+        String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, true);
+        if (threat != null) {
+            throw new SecurityException(threat);
         }
-        if (Debug.isDebuggerConnected() || Debug.waitingForDebugger()) {
-            throw new SecurityException("DS PRO Protection: Memory debugger blocked");
+    }
+
+    private static String detectRuntimeThreat(
+        String apkPath,
+        String dataDir,
+        String packageName,
+        boolean strictAntiDump,
+        boolean deepScan
+    ) {
+        if (strictAntiDump && (Debug.isDebuggerConnected() || Debug.waitingForDebugger())) {
+            return /*O*/"DS PRO Protection: Memory debugger blocked"/*O*/;
         }
         if (hasTracerAttached()) {
-            throw new SecurityException("DS PRO Protection: Ptrace dump blocked");
+            return /*O*/"DS PRO Protection: Ptrace dump blocked"/*O*/;
         }
-        if (isRunningInVirtualContainer(apkPath, dataDir)) {
-            throw new SecurityException("DS PRO Protection: Virtual container / dumper sandbox blocked");
+        if (hasHookedCoreMethods(deepScan)) {
+            return /*O*/"DS PRO Protection: Runtime API hook / dumper blocked"/*O*/;
         }
-        if (hasHookedCoreMethods()) {
-            throw new SecurityException("DS PRO Protection: Runtime API hook / dumper blocked");
+        if (hasSuspiciousThreads() || hasSuspiciousOpenFds()) {
+            return /*O*/"DS PRO Protection: Memory dumper detected"/*O*/;
         }
-        if (hasDumperInMapsThreadsOrFd()) {
-            throw new SecurityException("DS PRO Protection: Memory dumper detected");
+        if (deepScan) {
+            if (isRunningInVirtualContainer(apkPath, dataDir, packageName)) {
+                return /*O*/"DS PRO Protection: Virtual container / dumper sandbox blocked"/*O*/;
+            }
+            if (hasDumperInMaps() || hasHookedInstrumentation()) {
+                return /*O*/"DS PRO Protection: Memory dumper detected"/*O*/;
+            }
+            if (strictAntiDump && hasDumperSockets()) {
+                return /*O*/"DS PRO Protection: Dumper socket detected"/*O*/;
+            }
         }
+        return null;
     }
 
     static void verifyGuardBindingIfRequired(Context context, CoreMetadata meta) {
@@ -192,12 +272,12 @@ final class DsProCoreLoader {
         }
         try (ZipFile zip = new ZipFile(context.getPackageCodePath())) {
             if (zip.getEntry(GUARD_POLICY_ASSET) == null) {
-                throw new SecurityException("DS PRO Protection: Guard policy missing");
+                throw new SecurityException(/*O*/"DS PRO Protection: Guard policy missing"/*O*/);
             }
         } catch (SecurityException se) {
             throw se;
         } catch (Throwable t) {
-            throw new SecurityException("DS PRO Protection: Guard check failed");
+            throw new SecurityException(/*O*/"DS PRO Protection: Guard check failed"/*O*/);
         }
 
         try {
@@ -216,13 +296,13 @@ final class DsProCoreLoader {
                 }
             }
             if (!found) {
-                throw new SecurityException("DS PRO Protection: Guard integrity compromised");
+                throw new SecurityException(/*O*/"DS PRO Protection: Guard integrity compromised"/*O*/);
             }
             guardBindingVerified = true;
         } catch (SecurityException se) {
             throw se;
         } catch (Throwable t) {
-            throw new SecurityException("DS PRO Protection: Guard verification error");
+            throw new SecurityException(/*O*/"DS PRO Protection: Guard verification error"/*O*/);
         }
     }
 
@@ -231,82 +311,109 @@ final class DsProCoreLoader {
     }
 
     static DecryptedBundle decryptAll(String apkPath, String packageName, String dataDir) {
+        enforcePreDecryptAntiDump(apkPath, dataDir, packageName, false);
+
         byte[] salt = null;
+        byte[] maskedPepper = null;
+        byte[] bindingMask = null;
+        byte[] pepper = null;
         byte[] metaKey = null;
         byte[] metaCipher = null;
         byte[] metaPlainBytes = null;
         byte[] aesKey = null;
+        byte[] coreDexSha256 = null;
+        byte[] guardDexSha256 = null;
 
         try (ZipFile zip = new ZipFile(apkPath)) {
             ZipEntry entry = zip.getEntry(CONTAINER_ASSET);
             if (entry == null) {
-                throw new IllegalStateException("Missing DS PRO protected container.");
+                throw new IllegalStateException(/*O*/"Missing DS PRO protected container."/*O*/);
             }
+            coreDexSha256 = sha256ZipEntry(zip, /*O*/"classes.dex"/*O*/);
+            boolean hasGuardAsset = zip.getEntry(GUARD_POLICY_ASSET) != null;
+            guardDexSha256 = hasGuardAsset ? sha256ZipEntry(zip, /*O*/"classes2.dex"/*O*/) : new byte[32];
 
             try (DataInputStream dis = new DataInputStream(new BufferedInputStream(zip.getInputStream(entry), 32768))) {
                 salt = new byte[16];
                 dis.readFully(salt);
+                maskedPepper = new byte[32];
+                dis.readFully(maskedPepper);
                 byte[] metaIv = new byte[12];
                 dis.readFully(metaIv);
                 int metaCipherLen = dis.readInt();
                 if (metaCipherLen <= 16 || metaCipherLen > 1024 * 1024) {
-                    throw new IllegalStateException("Corrupt protected container header.");
+                    throw new IllegalStateException(/*O*/"Corrupt protected container header."/*O*/);
                 }
                 metaCipher = new byte[metaCipherLen];
                 dis.readFully(metaCipher);
 
-                String saltHex = toLowerHex(salt);
-                Cipher metaDecryptor = Cipher.getInstance("AES/GCM/NoPadding");
-                boolean isV4 = true;
-                try {
-                    metaKey = MessageDigest.getInstance("SHA-256").digest(
-                        (packageName + ":DSPRO_CORE_V4:" + saltHex).getBytes(StandardCharsets.UTF_8)
-                    );
-                    metaDecryptor.init(
-                        Cipher.DECRYPT_MODE,
-                        new SecretKeySpec(metaKey, "AES"),
-                        new GCMParameterSpec(128, metaIv)
-                    );
-                    metaPlainBytes = metaDecryptor.doFinal(metaCipher);
-                } catch (Throwable v4Miss) {
-                    isV4 = false;
-                    wipe(metaKey);
-                    metaKey = MessageDigest.getInstance("SHA-256").digest(
-                        (packageName + ":DSPRO_CORE_V3:" + saltHex).getBytes(StandardCharsets.UTF_8)
-                    );
-                    metaDecryptor.init(
-                        Cipher.DECRYPT_MODE,
-                        new SecretKeySpec(metaKey, "AES"),
-                        new GCMParameterSpec(128, metaIv)
-                    );
-                    metaPlainBytes = metaDecryptor.doFinal(metaCipher);
+                byte[] pkgBytes = packageName.getBytes(StandardCharsets.UTF_8);
+                MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+                sha256.update(pkgBytes);
+                sha256.update(/*O*/":V5M:"/*O*/.getBytes(StandardCharsets.UTF_8));
+                sha256.update(salt);
+                sha256.update(coreDexSha256);
+                sha256.update(guardDexSha256);
+                bindingMask = sha256.digest();
+
+                pepper = new byte[32];
+                for (int i = 0; i < 32; i++) {
+                    pepper[i] = (byte) (maskedPepper[i] ^ bindingMask[i]);
                 }
+                wipe(bindingMask);
+
+                sha256.reset();
+                sha256.update(pepper);
+                sha256.update(salt);
+                sha256.update(coreDexSha256);
+                sha256.update(guardDexSha256);
+                sha256.update(pkgBytes);
+                metaKey = sha256.digest();
+                for (int r = 0; r < 1024; r++) {
+                    sha256.reset();
+                    sha256.update(metaKey);
+                    sha256.update(pepper);
+                    sha256.update((byte) (r & 0xFF));
+                    byte[] next = sha256.digest();
+                    wipe(metaKey);
+                    metaKey = next;
+                }
+                wipe(pepper);
+
+                Cipher metaDecryptor = Cipher.getInstance("AES/GCM/NoPadding");
+                metaDecryptor.init(
+                    Cipher.DECRYPT_MODE,
+                    new SecretKeySpec(metaKey, "AES"),
+                    new GCMParameterSpec(128, metaIv)
+                );
+                metaPlainBytes = metaDecryptor.doFinal(metaCipher);
+                wipe(metaKey);
 
                 String metaText = new String(metaPlainBytes, StandardCharsets.UTF_8);
                 String[] lines = metaText.split("\n", -1);
                 if (lines.length < 4) {
-                    throw new IllegalStateException("Invalid protected container metadata.");
+                    throw new IllegalStateException(/*O*/"Invalid protected container metadata."/*O*/);
                 }
                 int dexCount = Integer.parseInt(lines[0].trim());
                 String originalApp = lines[1].trim();
                 String originalFactory = lines[2].trim();
                 aesKey = hexToBytes(lines[3].trim());
                 boolean requireGuard = lines.length >= 5 && "1".equals(lines[4].trim());
-                boolean compressedPayloads = lines.length >= 6 && "Z1".equals(lines[5].trim());
+                boolean compressedPayloads = lines.length >= 6 && /*O*/"Z1"/*O*/.equals(lines[5].trim());
                 boolean antiDumpEnabled = lines.length >= 7 && "1".equals(lines[6].trim());
 
-                enforcePreDecryptAntiDump(apkPath, dataDir, antiDumpEnabled);
-
-                if (requireGuard && zip.getEntry(GUARD_POLICY_ASSET) == null) {
-                    throw new SecurityException("DS PRO Protection: Guard policy missing");
+                if (antiDumpEnabled) {
+                    enforcePreDecryptAntiDump(apkPath, dataDir, packageName, true);
+                }
+                if (requireGuard && !hasGuardAsset) {
+                    throw new SecurityException(/*O*/"DS PRO Protection: Guard policy missing"/*O*/);
                 }
 
                 CoreMetadata meta = new CoreMetadata(dexCount, originalApp, originalFactory, requireGuard, antiDumpEnabled);
 
                 ByteBuffer[] buffers = new ByteBuffer[dexCount];
                 Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-                MessageDigest sha256 = isV4 ? MessageDigest.getInstance("SHA-256") : null;
-                SecretKeySpec v3KeySpec = isV4 ? null : new SecretKeySpec(aesKey, "AES");
+                byte[] dexTag = /*O*/":DEX:"/*O*/.getBytes(StandardCharsets.UTF_8);
                 byte[] iv = new byte[12];
                 for (int i = 0; i < dexCount; i++) {
                     dis.readFully(iv);
@@ -317,20 +424,15 @@ final class DsProCoreLoader {
                     byte[] encrypted = new byte[cipherLen];
                     dis.readFully(encrypted);
 
-                    SecretKeySpec entryKeySpec;
-                    byte[] entryKey = null;
-                    if (isV4) {
-                        String ivHex = toLowerHex(iv);
-                        sha256.reset();
-                        sha256.update(aesKey);
-                        sha256.update((":DEX:" + i + ":" + ivHex).getBytes(StandardCharsets.UTF_8));
-                        entryKey = sha256.digest();
-                        entryKeySpec = new SecretKeySpec(entryKey, "AES");
-                    } else {
-                        entryKeySpec = v3KeySpec;
-                    }
+                    String ivHex = toLowerHex(iv);
+                    sha256.reset();
+                    sha256.update(aesKey);
+                    sha256.update(dexTag);
+                    sha256.update((i + ":" + ivHex).getBytes(StandardCharsets.UTF_8));
+                    sha256.update(coreDexSha256);
+                    byte[] entryKey = sha256.digest();
 
-                    cipher.init(Cipher.DECRYPT_MODE, entryKeySpec, new GCMParameterSpec(128, iv));
+                    cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(entryKey, "AES"), new GCMParameterSpec(128, iv));
                     byte[] decrypted = cipher.doFinal(encrypted);
                     Arrays.fill(encrypted, (byte) 0);
                     wipe(entryKey);
@@ -340,7 +442,6 @@ final class DsProCoreLoader {
                         Arrays.fill(decrypted, (byte) 0);
                     }
 
-                    // Store in DirectByteBuffer and immediately wipe the Java heap byte[] copy.
                     ByteBuffer direct = ByteBuffer.allocateDirect(plainDex.length);
                     direct.put(plainDex);
                     direct.flip();
@@ -355,11 +456,32 @@ final class DsProCoreLoader {
             throw new SecurityException("DS PRO Core failed: " + t.getMessage(), t);
         } finally {
             wipe(salt);
+            wipe(maskedPepper);
+            wipe(bindingMask);
+            wipe(pepper);
             wipe(metaKey);
             wipe(metaCipher);
             wipe(metaPlainBytes);
             wipe(aesKey);
+            wipe(coreDexSha256);
+            wipe(guardDexSha256);
         }
+    }
+
+    private static byte[] sha256ZipEntry(ZipFile zip, String entryName) throws Exception {
+        ZipEntry e = zip.getEntry(entryName);
+        if (e == null) {
+            throw new SecurityException(/*O*/"DS PRO Protection: Core archive altered"/*O*/);
+        }
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        try (InputStream in = zip.getInputStream(e)) {
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                md.update(buf, 0, n);
+            }
+        }
+        return md.digest();
     }
 
     private static byte[] inflateBytes(byte[] compressed) throws Exception {
@@ -420,11 +542,12 @@ final class DsProCoreLoader {
     }
 
     private static boolean hasTracerAttached() {
-        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"))) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/status"/*O*/))) {
             String line;
+            String prefix = /*O*/"TracerPid:"/*O*/;
             while ((line = reader.readLine()) != null) {
-                if (line.startsWith("TracerPid:")) {
-                    String val = line.substring("TracerPid:".length()).trim();
+                if (line.startsWith(prefix)) {
+                    String val = line.substring(prefix.length()).trim();
                     if (!"0".equals(val) && !val.isEmpty()) {
                         return true;
                     }
@@ -436,37 +559,126 @@ final class DsProCoreLoader {
         return false;
     }
 
-    private static boolean isRunningInVirtualContainer(String apkPath, String dataDir) {
+    private static boolean isRunningInVirtualContainer(String apkPath, String dataDir, String packageName) {
         if (apkPath != null) {
             String lower = apkPath.toLowerCase(Locale.US);
-            if (lower.contains("/data/data/")
-                || lower.contains("/data/user/")
-                || lower.contains("/sdcard/")
-                || lower.contains("/storage/emulated/")
-                || lower.contains("/virtual/")
-                || lower.contains("blackbox")
-                || lower.contains("blackdex")
-                || lower.contains("sandvxposed")) {
+            if (lower.contains(/*O*/"/data/data/"/*O*/)
+                || lower.contains(/*O*/"/data/user/"/*O*/)
+                || lower.contains(/*O*/"/sdcard/"/*O*/)
+                || lower.contains(/*O*/"/storage/emulated/"/*O*/)
+                || lower.contains(/*O*/"/virtual/"/*O*/)
+                || lower.contains(/*O*/"blackbox"/*O*/)
+                || lower.contains(/*O*/"blackdex"/*O*/)
+                || lower.contains(/*O*/"sandvxposed"/*O*/)
+                || lower.contains(/*O*/"dualspace"/*O*/)
+                || lower.contains(/*O*/"virtualapp"/*O*/)
+                || lower.contains(/*O*/"cloneapp"/*O*/)) {
                 return true;
             }
         }
         if (dataDir != null) {
             String lower = dataDir.toLowerCase(Locale.US);
-            if (lower.contains("/virtual/")
-                || lower.contains("blackbox")
-                || lower.contains("blackdex")
-                || lower.contains("sandvxposed")
-                || lower.contains("dualspace")) {
+            if (lower.contains(/*O*/"/virtual/"/*O*/)
+                || lower.contains(/*O*/"blackbox"/*O*/)
+                || lower.contains(/*O*/"blackdex"/*O*/)
+                || lower.contains(/*O*/"sandvxposed"/*O*/)
+                || lower.contains(/*O*/"dualspace"/*O*/)
+                || lower.contains(/*O*/"virtualapp"/*O*/)
+                || lower.contains(/*O*/"parallel"/*O*/)
+                || lower.contains(/*O*/"cloneapp"/*O*/)) {
                 return true;
+            }
+        }
+        String cmdline = readCmdline();
+        if (!cmdline.isEmpty()) {
+            String lowerCmd = cmdline.toLowerCase(Locale.US);
+            if (lowerCmd.contains(/*O*/"blackdex"/*O*/)
+                || lowerCmd.contains(/*O*/"blackbox"/*O*/)
+                || lowerCmd.contains(/*O*/"virtualapp"/*O*/)
+                || lowerCmd.contains(/*O*/"io.va."/*O*/)
+                || lowerCmd.contains(/*O*/"com.lody"/*O*/)
+                || lowerCmd.contains(/*O*/"sandvxposed"/*O*/)
+                || lowerCmd.contains(/*O*/"dualspace"/*O*/)
+                || lowerCmd.contains(/*O*/"parallel"/*O*/)
+                || lowerCmd.contains(/*O*/"excean"/*O*/)
+                || lowerCmd.contains(/*O*/"gbox"/*O*/)
+                || lowerCmd.contains(/*O*/"ludashi"/*O*/)
+                || lowerCmd.contains(/*O*/"cloneapp"/*O*/)
+                || lowerCmd.contains(/*O*/"dumper"/*O*/)) {
+                return true;
+            }
+            if (packageName != null && !packageName.isEmpty() && !cmdline.startsWith(packageName)) {
+                if (!mapsContainsPackageApk(packageName)) {
+                    return true;
+                }
             }
         }
         return false;
     }
 
-    private static boolean hasHookedCoreMethods() {
+    private static String readCmdline() {
+        try (InputStream in = new java.io.FileInputStream(/*O*/"/proc/self/cmdline"/*O*/)) {
+            byte[] buf = new byte[256];
+            int n = in.read(buf);
+            if (n <= 0) return "";
+            int end = 0;
+            while (end < n && buf[end] != 0) end++;
+            return new String(buf, 0, end, StandardCharsets.UTF_8).trim();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static boolean mapsContainsPackageApk(String packageName) {
+        String lowerPkg = packageName.toLowerCase(Locale.US);
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String lower = line.toLowerCase(Locale.US);
+                if (lower.contains(lowerPkg) && lower.contains(".apk")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean hasHookedInstrumentation() {
+        try {
+            Class<?> atCls = Class.forName(/*O*/"android.app.ActivityThread"/*O*/);
+            Method curAt = atCls.getDeclaredMethod(/*O*/"currentActivityThread"/*O*/);
+            Object at = curAt.invoke(null);
+            if (at != null) {
+                Object inst = getField(at, "mInstrumentation");
+                if (inst != null) {
+                    String cls = safeLower(inst.getClass().getName());
+                    if (cls.contains(/*O*/"blackbox"/*O*/)
+                        || cls.contains(/*O*/"blackdex"/*O*/)
+                        || cls.contains(/*O*/"virtual"/*O*/)
+                        || cls.contains(/*O*/"lody"/*O*/)
+                        || cls.contains(/*O*/"sandhook"/*O*/)
+                        || cls.contains(/*O*/"xposed"/*O*/)
+                        || cls.contains(/*O*/"lsposed"/*O*/)
+                        || cls.contains(/*O*/"dualspace"/*O*/)
+                        || cls.contains(/*O*/"clone"/*O*/)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean hasHookedCoreMethods(boolean checkAllStacks) {
         try {
             Method doFinalMethod = Cipher.class.getDeclaredMethod("doFinal", byte[].class);
             if (Modifier.isNative(doFinalMethod.getModifiers())) {
+                return true;
+            }
+            Method digestMethod = MessageDigest.class.getDeclaredMethod("digest", byte[].class);
+            if (Modifier.isNative(digestMethod.getModifiers())) {
                 return true;
             }
             Method loadClassMethod = ClassLoader.class.getDeclaredMethod("loadClass", String.class);
@@ -477,67 +689,112 @@ final class DsProCoreLoader {
             if (Modifier.isNative(findClassMethod.getModifiers())) {
                 return true;
             }
+            Method inflateMethod = Inflater.class.getDeclaredMethod("inflate", byte[].class);
+            if (Modifier.isNative(inflateMethod.getModifiers())) {
+                return true;
+            }
+            Method decryptMethod = DsProCoreLoader.class.getDeclaredMethod("decryptAll", String.class, String.class, String.class);
+            if (Modifier.isNative(decryptMethod.getModifiers())) {
+                return true;
+            }
+            for (Constructor<?> ctor : InMemoryDexClassLoader.class.getDeclaredConstructors()) {
+                if (Modifier.isNative(ctor.getModifiers())) {
+                    return true;
+                }
+            }
         } catch (Throwable ignored) {
         }
-        for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
+        if (hasSuspiciousFrames(Thread.currentThread().getStackTrace())) {
+            return true;
+        }
+        if (checkAllStacks) {
+            try {
+                Map<Thread, StackTraceElement[]> all = Thread.getAllStackTraces();
+                for (StackTraceElement[] frames : all.values()) {
+                    if (hasSuspiciousFrames(frames)) {
+                        return true;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasSuspiciousFrames(StackTraceElement[] frames) {
+        if (frames == null) return false;
+        for (StackTraceElement el : frames) {
             String cls = safeLower(el.getClassName());
-            if (cls.contains("xposed")
-                || cls.contains("lsposed")
-                || cls.contains("lsphooker")
-                || cls.contains("edhooker")
-                || cls.contains("sandhook")
-                || cls.contains("pine")
-                || cls.contains("epic")
-                || cls.contains("whale")
-                || cls.contains("blackdex")
-                || cls.contains("blackbox")
-                || cls.contains("dumpdex")
-                || cls.contains("fupk")
-                || cls.contains("youpk")
-                || cls.contains("dexdump")
-                || cls.contains("frida")) {
+            if (cls.contains(/*O*/"xposed"/*O*/)
+                || cls.contains(/*O*/"lsposed"/*O*/)
+                || cls.contains(/*O*/"lsphooker"/*O*/)
+                || cls.contains(/*O*/"edhooker"/*O*/)
+                || cls.contains(/*O*/"sandhook"/*O*/)
+                || cls.contains(/*O*/"pine"/*O*/)
+                || cls.contains(/*O*/"epic"/*O*/)
+                || cls.contains(/*O*/"whale"/*O*/)
+                || cls.contains(/*O*/"blackdex"/*O*/)
+                || cls.contains(/*O*/"blackbox"/*O*/)
+                || cls.contains(/*O*/"dumpdex"/*O*/)
+                || cls.contains(/*O*/"fupk"/*O*/)
+                || cls.contains(/*O*/"youpk"/*O*/)
+                || cls.contains(/*O*/"dexdump"/*O*/)
+                || cls.contains(/*O*/"cn.mik.fart"/*O*/)
+                || cls.contains(/*O*/"top.niunaijun"/*O*/)
+                || cls.contains(/*O*/"com.lody"/*O*/)
+                || cls.contains(/*O*/"frida"/*O*/)) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean hasDumperInMapsThreadsOrFd() {
-        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/maps"))) {
+    private static boolean hasDumperInMaps() {
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String lower = line.toLowerCase(Locale.US);
-                if (lower.contains("frida")
-                    || lower.contains("re.frida")
-                    || lower.contains("memfd:frida")
-                    || lower.contains("linjector")
-                    || lower.contains("blackdex")
-                    || lower.contains("blackbox")
-                    || lower.contains("dumpdex")
-                    || lower.contains("fupk3")
-                    || lower.contains("libfart")
-                    || lower.contains("fart_art")
-                    || lower.contains("youpk")
-                    || lower.contains("drizzledumper")
-                    || lower.contains("libsubstrate")
-                    || lower.contains("zygisk")
-                    || lower.contains("libriru")
-                    || lower.contains("lsposed")
-                    || lower.contains("lspd")
-                    || lower.contains("edxposed")
-                    || lower.contains("sandhook")
-                    || lower.contains("libpine")
-                    || lower.contains("libepic")
-                    || lower.contains("libwhale")
-                    || lower.contains("libdobby")) {
+                if (lower.contains(/*O*/"frida"/*O*/)
+                    || lower.contains(/*O*/"re.frida"/*O*/)
+                    || lower.contains(/*O*/"memfd:frida"/*O*/)
+                    || lower.contains(/*O*/"hluda"/*O*/)
+                    || lower.contains(/*O*/"florida"/*O*/)
+                    || lower.contains(/*O*/"linjector"/*O*/)
+                    || lower.contains(/*O*/"blackdex"/*O*/)
+                    || lower.contains(/*O*/"blackbox"/*O*/)
+                    || lower.contains(/*O*/"libnmmvm"/*O*/)
+                    || lower.contains(/*O*/"dumpdex"/*O*/)
+                    || lower.contains(/*O*/"fupk3"/*O*/)
+                    || lower.contains(/*O*/"libfart"/*O*/)
+                    || lower.contains(/*O*/"fart_art"/*O*/)
+                    || lower.contains(/*O*/"youpk"/*O*/)
+                    || lower.contains(/*O*/"dexdump"/*O*/)
+                    || lower.contains(/*O*/"drizzledumper"/*O*/)
+                    || lower.contains(/*O*/"dexextractor"/*O*/)
+                    || lower.contains(/*O*/"libsubstrate"/*O*/)
+                    || lower.contains(/*O*/"zygisk"/*O*/)
+                    || lower.contains(/*O*/"libriru"/*O*/)
+                    || lower.contains(/*O*/"shamiko"/*O*/)
+                    || lower.contains(/*O*/"lsposed"/*O*/)
+                    || lower.contains(/*O*/"lspd"/*O*/)
+                    || lower.contains(/*O*/"edxposed"/*O*/)
+                    || lower.contains(/*O*/"sandhook"/*O*/)
+                    || lower.contains(/*O*/"libpine"/*O*/)
+                    || lower.contains(/*O*/"libepic"/*O*/)
+                    || lower.contains(/*O*/"libwhale"/*O*/)
+                    || lower.contains(/*O*/"libdobby"/*O*/)
+                    || (lower.contains(/*O*/"/data/local/tmp/"/*O*/) && lower.contains(".so"))) {
                     return true;
                 }
             }
         } catch (Throwable ignored) {
         }
+        return false;
+    }
 
+    private static boolean hasSuspiciousThreads() {
         try {
-            File taskDir = new File("/proc/self/task");
+            File taskDir = new File(/*O*/"/proc/self/task"/*O*/);
             File[] tasks = taskDir.listFiles();
             if (tasks != null) {
                 for (File t : tasks) {
@@ -547,11 +804,12 @@ final class DsProCoreLoader {
                         String name = br.readLine();
                         if (name != null) {
                             String lower = name.trim().toLowerCase(Locale.US);
-                            if (lower.contains("gum-js-loop")
-                                || lower.contains("pool-frida")
-                                || lower.contains("linjector")
-                                || lower.contains("blackdex")
-                                || lower.contains("fupk3")) {
+                            if (lower.contains(/*O*/"gum-js-loop"/*O*/)
+                                || lower.contains(/*O*/"pool-frida"/*O*/)
+                                || lower.contains(/*O*/"linjector"/*O*/)
+                                || lower.contains(/*O*/"blackdex"/*O*/)
+                                || lower.contains(/*O*/"fupk3"/*O*/)
+                                || lower.contains(/*O*/"dumpdex"/*O*/)) {
                                 return true;
                             }
                         }
@@ -561,19 +819,69 @@ final class DsProCoreLoader {
             }
         } catch (Throwable ignored) {
         }
+        return false;
+    }
 
+    private static boolean hasSuspiciousOpenFds() {
         try {
-            File fdDir = new File("/proc/self/fd");
+            File fdDir = new File(/*O*/"/proc/self/fd"/*O*/);
             File[] fds = fdDir.listFiles();
             if (fds != null) {
                 for (File fd : fds) {
                     String target = safeLower(fd.getCanonicalPath());
-                    if (target.contains("frida")
-                        || target.contains("blackdex")
-                        || target.contains("dumpdex")
-                        || target.contains("fupk")
-                        || target.contains("libfart")
-                        || target.contains("youpk")) {
+                    if (target.contains(/*O*/"frida"/*O*/)
+                        || target.contains(/*O*/"hluda"/*O*/)
+                        || target.contains(/*O*/"florida"/*O*/)
+                        || target.contains(/*O*/"blackdex"/*O*/)
+                        || target.contains(/*O*/"blackbox"/*O*/)
+                        || target.contains(/*O*/"dumpdex"/*O*/)
+                        || target.contains(/*O*/"fupk"/*O*/)
+                        || target.contains(/*O*/"libfart"/*O*/)
+                        || target.contains(/*O*/"youpk"/*O*/)
+                        || target.contains(/*O*/"drizzledumper"/*O*/)) {
+                        return true;
+                    }
+                    if (target.endsWith(".dex")
+                        && (target.contains(/*O*/"/sdcard/"/*O*/)
+                            || target.contains(/*O*/"/storage/emulated/"/*O*/)
+                            || target.contains(/*O*/"/data/local/tmp/"/*O*/)
+                            || target.contains(/*O*/"/dump"/*O*/))) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean hasDumperSockets() {
+        return containsFridaListeningPort(/*O*/"/proc/net/tcp"/*O*/)
+            || containsFridaListeningPort(/*O*/"/proc/net/tcp6"/*O*/)
+            || containsInFile(/*O*/"/proc/net/unix"/*O*/, /*O*/"frida"/*O*/, /*O*/"linjector"/*O*/, /*O*/"hluda"/*O*/, /*O*/"florida"/*O*/, /*O*/"blackdex"/*O*/);
+    }
+
+    private static boolean containsFridaListeningPort(String tcpPath) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(tcpPath))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String lower = line.toLowerCase(Locale.US);
+                if ((lower.contains(":69a2 ") || lower.contains(":69a3 ")) && lower.contains(" 0a ")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean containsInFile(String filePath, String... needles) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String lower = line.toLowerCase(Locale.US);
+                for (String needle : needles) {
+                    if (lower.contains(needle)) {
                         return true;
                     }
                 }

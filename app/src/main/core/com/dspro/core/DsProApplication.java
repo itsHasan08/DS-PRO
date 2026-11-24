@@ -51,6 +51,12 @@ public class DsProApplication extends Application {
                 }
             }
             DsProCoreLoader.markInitialized(base.getPackageName(), bundle.metadata, base.getClassLoader(), factory);
+            DsProCoreLoader.startCoreWatchdog(
+                base.getPackageCodePath(),
+                dataDir,
+                base.getPackageName(),
+                bundle.metadata.antiDumpEnabled
+            );
         }
 
         ClassLoader active = DsProCoreLoader.getActiveClassLoader();

@@ -496,15 +496,15 @@ private val INFO_SIGNATURE_PINNING = ProtectionFeatureInfo(
 private val INFO_ANTI_DUMP = ProtectionFeatureInfo(
     id = "anti_dump",
     title = "Anti Dump",
-    whatTurnsOn = "Activates Live Anti-Dump Watchdog inside DsProGuardProvider and enforces pre-decrypt memory guards.",
-    howItWorks = "Blocks Frida-dexdump, BlackDex, FUPK3/Youpk/DrizzleDumper, Frida sockets (27042/27043), gum-js-loop threads, and ptrace memory dumping both before decryption and continuously at runtime.",
+    whatTurnsOn = "Activates 150ms burst + continuous Anti-Dump Watchdog across both DsProCoreLoader and DsProGuardProvider.",
+    howItWorks = "Blocks BlackDex/BlackBox/VirtualApp sandboxes (/proc/self/cmdline & maps), Frida/hluda/florida, ART hooks on Cipher/ClassLoader/InMemoryDexClassLoader, and open .dex dump file descriptors in real time.",
 )
 
 private val INFO_DSPRO_ENCRYPT = ProtectionFeatureInfo(
     id = "dspro_dex_encryption",
     title = "DS PRO Encrypt",
-    whatTurnsOn = "Compresses and encrypts all original classes*.dex payloads with AES-256-GCM into assets/dspro_core.bin, injects DsProApplication + DsProComponentFactory, wipes keys, and binds guard integrity.",
-    howItWorks = "Replaces classes.dex with the compact DS PRO loader and decrypts compressed DEX payloads strictly in memory to keep protected APK size minimal.",
+    whatTurnsOn = "Compresses and encrypts all classes*.dex payloads into V5 AES-256-GCM per-DEX ephemeral keys bound to classes.dex & guard hashes, using a decoupled ClassLoader shell and XOR-obfuscated loader strings.",
+    howItWorks = "Replaces classes.dex with a tamper-locked loader, hides InMemoryDexClassLoader out of dexElements, wipes DirectByteBuffers immediately, and always runs core anti-dump/anti-virtualizer guards before & after decryption.",
 )
 
 private val INFO_DISABLE_DEBUGGABLE = ProtectionFeatureInfo(
