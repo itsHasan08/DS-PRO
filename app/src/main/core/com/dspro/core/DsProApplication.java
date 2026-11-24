@@ -24,11 +24,20 @@ public class DsProApplication extends Application {
         this.attachedBase = base;
 
         if (!DsProCoreLoader.isInitialized()) {
+            String dataDir = null;
+            try {
+                dataDir = base.getFilesDir().getAbsolutePath();
+            } catch (Throwable ignored) {
+            }
             DsProCoreLoader.DecryptedBundle bundle = DsProCoreLoader.decryptAll(
                 base.getPackageCodePath(),
-                base.getPackageName()
+                base.getPackageName(),
+                dataDir
             );
             DsProCoreLoader.injectIntoHostClassLoader(base.getClassLoader(), bundle.dexBuffers);
+            if (Build.VERSION.SDK_INT >= 27) {
+                DsProCoreLoader.wipeBuffers(bundle.dexBuffers);
+            }
 
             Object factory = null;
             if (Build.VERSION.SDK_INT >= 28 && !bundle.metadata.originalFactoryClass.isEmpty()
@@ -83,7 +92,6 @@ public class DsProApplication extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
-        DsProCoreLoader.verifyGuardBindingIfRequired(this, DsProCoreLoader.getCachedMetadata());
         if (realApplication != null) {
             bindRealApplicationToSystem(realApplication);
             realApplication.onCreate();

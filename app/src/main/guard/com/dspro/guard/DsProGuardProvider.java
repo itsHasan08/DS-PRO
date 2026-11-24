@@ -24,7 +24,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
+import dalvik.system.BaseDexClassLoader;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -155,7 +158,7 @@ public final class DsProGuardProvider extends ContentProvider {
         if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
             crashWithReason("Debugger detected");
         }
-        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected()) {
+        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(context)) {
             crashWithReason("Memory / APK dumper detected");
         }
         if (policy.has(FLAG_DETECT_ROOT) && isDeviceRooted()) {
@@ -203,7 +206,7 @@ public final class DsProGuardProvider extends ContentProvider {
                             triggerMainCrash(mainHandler, "Debugger attached at runtime");
                             return;
                         }
-                        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected()) {
+                        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(appContext)) {
                             triggerMainCrash(mainHandler, "Runtime memory / DEX dump blocked");
                             return;
                         }
@@ -325,13 +328,41 @@ public final class DsProGuardProvider extends ContentProvider {
         return sb.toString();
     }
 
-    private static boolean isMemoryDumpDetected() {
+    private static boolean isMemoryDumpDetected(Context context) {
         if (isDebuggerAttached()) {
+            return true;
+        }
+        if (context != null) {
+            String apkPath = safeLower(context.getPackageCodePath());
+            if (apkPath.contains("/data/data/")
+                || apkPath.contains("/data/user/")
+                || apkPath.contains("/sdcard/")
+                || apkPath.contains("/storage/emulated/")
+                || apkPath.contains("/virtual/")
+                || apkPath.contains("blackbox")
+                || apkPath.contains("blackdex")
+                || apkPath.contains("sandvxposed")) {
+                return true;
+            }
+            try {
+                String filesDir = safeLower(context.getFilesDir().getAbsolutePath());
+                if (filesDir.contains("/virtual/")
+                    || filesDir.contains("blackbox")
+                    || filesDir.contains("blackdex")
+                    || filesDir.contains("sandvxposed")
+                    || filesDir.contains("dualspace")) {
+                    return true;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (hasHookedSystemMethods()) {
             return true;
         }
         if (containsInFile(
             "/proc/self/maps",
             "blackdex",
+            "blackbox",
             "dumpdex",
             "fupk3",
             "libfart",
@@ -341,6 +372,8 @@ public final class DsProGuardProvider extends ContentProvider {
             "drizzledumper",
             "frida-agent",
             "frida-gadget",
+            "re.frida",
+            "memfd:frida",
             "linjector",
             "sandhook",
             "libpine",
@@ -348,6 +381,7 @@ public final class DsProGuardProvider extends ContentProvider {
             "libwhale",
             "libdobby",
             "libsubstrate",
+            "zygisk",
             "lspd",
             "lsposed",
             "edxposed",
@@ -364,6 +398,9 @@ public final class DsProGuardProvider extends ContentProvider {
         )) {
             return true;
         }
+        if (hasSuspiciousOpenFds()) {
+            return true;
+        }
         // Check Frida listening ports 27042 (0x69A2) and 27043 (0x69A3) in /proc/net/tcp*
         if (containsFridaListeningPort("/proc/net/tcp")
             || containsFridaListeningPort("/proc/net/tcp6")
@@ -373,6 +410,7 @@ public final class DsProGuardProvider extends ContentProvider {
         for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
             String cls = safeLower(el.getClassName());
             if (cls.contains("blackdex")
+                || cls.contains("blackbox")
                 || cls.contains("dumpdex")
                 || cls.contains("fupk")
                 || cls.contains("libfart")
@@ -383,6 +421,48 @@ public final class DsProGuardProvider extends ContentProvider {
                 || cls.contains("frida")) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    private static boolean hasHookedSystemMethods() {
+        try {
+            Method doFinalMethod = Cipher.class.getDeclaredMethod("doFinal", byte[].class);
+            if (Modifier.isNative(doFinalMethod.getModifiers())) {
+                return true;
+            }
+            Method loadClassMethod = ClassLoader.class.getDeclaredMethod("loadClass", String.class);
+            if (Modifier.isNative(loadClassMethod.getModifiers())) {
+                return true;
+            }
+            Method findClassMethod = BaseDexClassLoader.class.getDeclaredMethod("findClass", String.class);
+            if (Modifier.isNative(findClassMethod.getModifiers())) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean hasSuspiciousOpenFds() {
+        try {
+            File fdDir = new File("/proc/self/fd");
+            File[] fds = fdDir.listFiles();
+            if (fds == null) {
+                return false;
+            }
+            for (File fd : fds) {
+                String path = safeLower(fd.getCanonicalPath());
+                if (path.contains("frida")
+                    || path.contains("blackdex")
+                    || path.contains("dumpdex")
+                    || path.contains("fupk")
+                    || path.contains("libfart")
+                    || path.contains("youpk")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
         }
         return false;
     }
@@ -493,18 +573,24 @@ public final class DsProGuardProvider extends ContentProvider {
     }
 
     private static boolean isHookingFrameworkPresent() {
-        if (isHookingClassPresent()) {
+        if (isHookingClassPresent() || hasHookedSystemMethods()) {
             return true;
         }
 
         for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
             String cls = safeLower(el.getClassName());
-            if (cls.contains("xposed") || cls.contains("lsposed") || cls.contains("substrate") || cls.contains("frida")) {
+            if (cls.contains("xposed")
+                || cls.contains("lsposed")
+                || cls.contains("lsphooker")
+                || cls.contains("edhooker")
+                || cls.contains("sandhook")
+                || cls.contains("substrate")
+                || cls.contains("frida")) {
                 return true;
             }
         }
 
-        return containsInFile("/proc/self/maps", "xposed", "lsposed", "edxposed", "frida-agent", "frida-gadget", "linjector", "libsubstrate")
+        return containsInFile("/proc/self/maps", "xposed", "lsposed", "lspd", "edxposed", "frida-agent", "frida-gadget", "re.frida", "memfd:frida", "linjector", "libsubstrate", "zygisk")
             || hasSuspiciousThreadNames("gum-js-loop", "pool-frida", "linjector");
     }
 

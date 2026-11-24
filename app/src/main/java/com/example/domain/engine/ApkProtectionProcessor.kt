@@ -482,6 +482,7 @@ class ApkProtectionProcessor(
                             originalAppClass = originalAppClass,
                             originalFactoryClass = originalFactoryClass,
                             requireGuard = config.requiresRuntimeGuard,
+                            antiDumpEnabled = config.antiDump,
                             dexPayloads = sortedOriginalDex.map { it.second },
                         )
                         if (writeZipBytes(countingOut, zipOut, written, coreAssetName, coreContainerBytes, keepStored = true)) {
@@ -563,6 +564,7 @@ class ApkProtectionProcessor(
             originalAppClass: String,
             originalFactoryClass: String,
             requireGuard: Boolean,
+            antiDumpEnabled: Boolean,
             dexPayloads: List<ByteArray>,
         ): ByteArray {
             val aesKey = ByteArray(32).also { rng.nextBytes(it) }
@@ -570,7 +572,7 @@ class ApkProtectionProcessor(
             val saltHex = salt.joinToString("") { "%02x".format(it) }
 
             val metaKey = MessageDigest.getInstance("SHA-256").digest(
-                "$packageName:DSPRO_CORE_V3:$saltHex".toByteArray(Charsets.UTF_8),
+                "$packageName:DSPRO_CORE_V4:$saltHex".toByteArray(Charsets.UTF_8),
             )
             val aesKeyHex = aesKey.joinToString("") { "%02x".format(it) }
             val metaPlain = buildString {
@@ -579,13 +581,16 @@ class ApkProtectionProcessor(
                 appendLine(originalFactoryClass)
                 appendLine(aesKeyHex)
                 appendLine(if (requireGuard) "1" else "0")
-                append("Z1")
+                appendLine("Z1")
+                append(if (antiDumpEnabled) "1" else "0")
             }.toByteArray(Charsets.UTF_8)
 
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             val metaIv = ByteArray(12).also { rng.nextBytes(it) }
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
             val metaCipher = cipher.doFinal(metaPlain)
+            metaPlain.fill(0)
+            metaKey.fill(0)
 
             val out = ByteArrayOutputStream()
             DataOutputStream(out).use { dos ->
@@ -594,17 +599,25 @@ class ApkProtectionProcessor(
                 dos.writeInt(metaCipher.size)
                 dos.write(metaCipher)
 
-                val keySpec = SecretKeySpec(aesKey, "AES")
+                val sha256 = MessageDigest.getInstance("SHA-256")
                 val iv = ByteArray(12)
-                dexPayloads.forEach { dexBytes ->
+                dexPayloads.forEachIndexed { idx, dexBytes ->
                     val compressedDex = deflateBytes(dexBytes, Deflater.BEST_COMPRESSION)
                     rng.nextBytes(iv)
-                    cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
+                    val ivHex = iv.joinToString("") { "%02x".format(it) }
+                    sha256.reset()
+                    sha256.update(aesKey)
+                    sha256.update(":DEX:$idx:$ivHex".toByteArray(Charsets.UTF_8))
+                    val entryKey = sha256.digest()
+                    cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(entryKey, "AES"), GCMParameterSpec(128, iv))
                     val cipherText = cipher.doFinal(compressedDex)
+                    compressedDex.fill(0)
+                    entryKey.fill(0)
                     dos.write(iv)
                     dos.writeInt(cipherText.size)
                     dos.write(cipherText)
                 }
+                aesKey.fill(0)
                 dos.flush()
             }
             return out.toByteArray()
@@ -752,7 +765,10 @@ class ApkProtectionProcessor(
             val nameLen = name.toByteArray(Charsets.UTF_8).size
             val unpaddedDataOffset = countingOut.bytesWritten + 30L + nameLen
             val remainder = (unpaddedDataOffset % alignment).toInt()
-            val pad = if (remainder == 0) 0 else alignment - remainder
+            var pad = if (remainder == 0) 0 else alignment - remainder
+            if (pad in 1..3) {
+                pad += alignment
+            }
             if (pad > 0) {
                 outEntry.extra = buildAlignmentPaddingExtra(pad)
             }
@@ -813,7 +829,10 @@ class ApkProtectionProcessor(
                 val nameLen = name.toByteArray(Charsets.UTF_8).size
                 val unpaddedDataOffset = countingOut.bytesWritten + 30L + nameLen
                 val remainder = (unpaddedDataOffset % alignment).toInt()
-                val pad = if (remainder == 0) 0 else alignment - remainder
+                var pad = if (remainder == 0) 0 else alignment - remainder
+                if (pad in 1..3) {
+                    pad += alignment
+                }
                 if (pad > 0) {
                     entry.extra = buildAlignmentPaddingExtra(pad)
                 }

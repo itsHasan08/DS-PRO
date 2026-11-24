@@ -99,12 +99,21 @@ class ExampleUnitTest {
                 val metaCipher = ByteArray(metaLen).also { dis.readFully(it) }
 
                 val saltHex = salt.joinToString("") { "%02x".format(it) }
-                val metaKey = MessageDigest.getInstance("SHA-256").digest(
-                    "$packageName:DSPRO_CORE_V3:$saltHex".toByteArray(Charsets.UTF_8),
-                )
-                val metaPlain = Cipher.getInstance("AES/GCM/NoPadding").run {
-                    init(Cipher.DECRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
-                    String(doFinal(metaCipher), Charsets.UTF_8)
+                val metaCipherObj = Cipher.getInstance("AES/GCM/NoPadding")
+                var isV4 = true
+                val metaPlain = try {
+                    val metaKey = MessageDigest.getInstance("SHA-256").digest(
+                        "$packageName:DSPRO_CORE_V4:$saltHex".toByteArray(Charsets.UTF_8),
+                    )
+                    metaCipherObj.init(Cipher.DECRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
+                    String(metaCipherObj.doFinal(metaCipher), Charsets.UTF_8)
+                } catch (_: Throwable) {
+                    isV4 = false
+                    val metaKey = MessageDigest.getInstance("SHA-256").digest(
+                        "$packageName:DSPRO_CORE_V3:$saltHex".toByteArray(Charsets.UTF_8),
+                    )
+                    metaCipherObj.init(Cipher.DECRYPT_MODE, SecretKeySpec(metaKey, "AES"), GCMParameterSpec(128, metaIv))
+                    String(metaCipherObj.doFinal(metaCipher), Charsets.UTF_8)
                 }
                 val lines = metaPlain.split("\n")
                 val dexCount = lines[0].trim().toInt()
@@ -113,14 +122,23 @@ class ExampleUnitTest {
                     ((Character.digit(aesKeyHex[i * 2], 16) shl 4) +
                         Character.digit(aesKeyHex[i * 2 + 1], 16)).toByte()
                 }
-                val keySpec = SecretKeySpec(aesKey, "AES")
+                val sha256 = MessageDigest.getInstance("SHA-256")
                 val isCompressed = lines.size >= 6 && lines[5].trim() == "Z1"
-                val dexList = (0 until dexCount).map {
+                val dexList = (0 until dexCount).map { idx ->
                     val iv = ByteArray(12).also { dis.readFully(it) }
                     val cLen = dis.readInt()
                     val enc = ByteArray(cLen).also { dis.readFully(it) }
+                    val entryKeySpec = if (isV4) {
+                        val ivHex = iv.joinToString("") { "%02x".format(it) }
+                        sha256.reset()
+                        sha256.update(aesKey)
+                        sha256.update(":DEX:$idx:$ivHex".toByteArray(Charsets.UTF_8))
+                        SecretKeySpec(sha256.digest(), "AES")
+                    } else {
+                        SecretKeySpec(aesKey, "AES")
+                    }
                     val plain = Cipher.getInstance("AES/GCM/NoPadding").run {
-                        init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, iv))
+                        init(Cipher.DECRYPT_MODE, entryKeySpec, GCMParameterSpec(128, iv))
                         doFinal(enc)
                     }
                     if (!isCompressed) {
@@ -383,6 +401,8 @@ class ExampleUnitTest {
 
                 val (metaLines, decryptedList) = decryptCorePayloads(outZip, "com.demo.app")
                 assertEquals("1", metaLines[4].trim()) // guard anti-removal binding enabled
+                assertEquals("Z1", metaLines[5].trim()) // pre-encryption DEX compression enabled
+                assertEquals("1", metaLines[6].trim()) // strict pre-decrypt anti-dump enabled
                 assertEquals(2, decryptedList.size)
                 assertArrayEquals(DexPatcher.stripDebugInfo(appDex1).first, decryptedList[0])
                 assertArrayEquals(DexPatcher.stripDebugInfo(appDex2).first, decryptedList[1])
@@ -723,6 +743,7 @@ class ExampleUnitTest {
             assertEquals(0x04034b50, buf.getInt(lfhOffset))
             val lfhNameLen = buf.getShort(lfhOffset + 26).toInt() and 0xFFFF
             val lfhExtraLen = buf.getShort(lfhOffset + 28).toInt() and 0xFFFF
+            assertTrue("Truncated LFH extra for $name", lfhExtraLen == 0 || lfhExtraLen >= 4)
             result[name] = lfhOffset.toLong() + 30L + lfhNameLen + lfhExtraLen
 
             pos += 46 + cdNameLen + cdExtraLen + cdCommentLen

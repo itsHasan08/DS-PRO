@@ -28,7 +28,8 @@ public final class DsProComponentFactory extends AppComponentFactory {
         if (!DsProCoreLoader.isInitialized()) {
             DsProCoreLoader.DecryptedBundle bundle = DsProCoreLoader.decryptAll(
                 aInfo.sourceDir,
-                aInfo.packageName
+                aInfo.packageName,
+                aInfo.dataDir
             );
             String librarySearchPath = buildLibrarySearchPath(aInfo);
             ClassLoader memLoader = new InMemoryDexClassLoader(
@@ -36,6 +37,7 @@ public final class DsProComponentFactory extends AppComponentFactory {
                 librarySearchPath,
                 cl
             );
+            DsProCoreLoader.wipeBuffers(bundle.dexBuffers);
 
             AppComponentFactory origFactory = null;
             if (!bundle.metadata.originalFactoryClass.isEmpty()
@@ -92,6 +94,16 @@ public final class DsProComponentFactory extends AppComponentFactory {
                     for (String abi : abis) {
                         if (sb.length() > 0) sb.append(File.pathSeparatorChar);
                         sb.append(splitDir).append("!/lib/").append(abi);
+                    }
+                }
+            }
+        }
+        if (aInfo.sharedLibraryFiles != null) {
+            for (String sharedLib : aInfo.sharedLibraryFiles) {
+                if (sharedLib != null && !sharedLib.isEmpty()) {
+                    for (String abi : abis) {
+                        if (sb.length() > 0) sb.append(File.pathSeparatorChar);
+                        sb.append(sharedLib).append("!/lib/").append(abi);
                     }
                 }
             }
