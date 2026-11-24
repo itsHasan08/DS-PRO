@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
@@ -58,6 +59,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -76,12 +80,17 @@ import com.example.ui.components.ProtectionPipelineCard
 import com.example.ui.components.SectionCard
 import com.example.ui.components.StatusPill
 import com.example.ui.theme.BorderSubtle
+import com.example.ui.theme.CanvasFrost
 import com.example.ui.theme.CharcoalText
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.ErrorTint
 import com.example.ui.theme.ProBlue
+import com.example.ui.theme.ProBlueBright
+import com.example.ui.theme.ProBlueDark
 import com.example.ui.theme.ProBlueTint
 import com.example.ui.theme.PureWhite
+import com.example.ui.theme.SectionGrey
+import com.example.ui.theme.SlateMuted
 import com.example.ui.theme.SuccessEmerald
 import com.example.ui.theme.SuccessTint
 import com.example.ui.theme.TealAccent
@@ -107,6 +116,7 @@ fun MainScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var activeInfoDialog by remember { mutableStateOf<Pair<ProtectionFeatureInfo, Boolean>?>(null) }
     val pullToRefreshState = rememberPullToRefreshState()
+    val gridState = rememberLazyGridState()
 
     val apkPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -148,6 +158,13 @@ fun MainScreen(
         label = "refresh_alpha",
     )
 
+    LaunchedEffect(uiState.isProcessing, uiState.runResult) {
+        if (uiState.isProcessing || uiState.runResult != null) {
+            val lastIdx = (gridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+            gridState.animateScrollToItem(lastIdx)
+        }
+    }
+
     activeInfoDialog?.let { (info, enabled) ->
         FeatureInfoDialog(
             info = info,
@@ -160,8 +177,8 @@ fun MainScreen(
         Scaffold(
             modifier = Modifier
                 .fillMaxSize()
-                .background(PureWhite),
-            containerColor = PureWhite,
+                .background(CanvasFrost),
+            containerColor = CanvasFrost,
             contentWindowInsets = WindowInsets.navigationBars,
             topBar = {
                 DsProTopBar(activeCount = cfg.activeToggleCount)
@@ -191,6 +208,7 @@ fun MainScreen(
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     LazyVerticalGrid(
+                        state = gridState,
                         columns = GridCells.Adaptive(minSize = 156.dp),
                         modifier = Modifier
                             .fillMaxSize()
@@ -277,7 +295,7 @@ fun MainScreen(
                                 Surface(
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp),
-                                    color = PureWhite,
+                                    color = SectionGrey,
                                     border = BorderStroke(1.dp, BorderSubtle),
                                 ) {
                                     Column(
@@ -413,30 +431,60 @@ fun MainScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = 52.dp)
+                                    .clip(RoundedCornerShape(12.dp))
                                     .testTag("start_protection_button"),
                                 shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(0.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = ProBlue,
+                                    containerColor = Color.Transparent,
                                     contentColor = PureWhite,
+                                    disabledContainerColor = Color.Transparent,
+                                    disabledContentColor = SlateMuted,
                                 ),
                             ) {
-                                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = if (uiState.isProcessing) "Processing (${uiState.progress}%)..." else "Start",
-                                    fontWeight = FontWeight.SemiBold,
-                                )
+                                val ctaBrush = when {
+                                    uiState.isProcessing -> Brush.horizontalGradient(listOf(ProBlueDark, ProBlue))
+                                    uiState.isStartEnabled -> Brush.horizontalGradient(listOf(ProBlue, ProBlueBright))
+                                    else -> Brush.horizontalGradient(listOf(BorderSubtle, BorderSubtle))
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 52.dp)
+                                        .background(ctaBrush)
+                                        .padding(horizontal = 16.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                ) {
+                                    if (uiState.isProcessing) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                            color = PureWhite,
+                                        )
+                                    } else {
+                                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = if (uiState.isProcessing) "Processing (${uiState.progress}%)..." else "Start",
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                }
                             }
 
                             if (uiState.isProcessing || uiState.progress > 0 || uiState.steps.isNotEmpty() || uiState.runResult != null) {
                                 ProtectionPipelineCard(
                                     isProcessing = uiState.isProcessing,
                                     progress = uiState.progress,
+                                    activeStageDetail = uiState.activeStageDetail,
                                     steps = uiState.steps,
                                     runResult = uiState.runResult,
+                                    isExported = uiState.isExported,
+                                    exportedSizeBytes = uiState.exportedSizeBytes,
                                     onExportClick = {
                                         val pkg = uiState.selectedApk?.packageName ?: "app"
-                                        exportLauncher.launch("${pkg}_dspro_unsigned.apk")
+                                        exportLauncher.launch("${pkg}_dspro_protected.apk")
                                     },
                                 )
                             }

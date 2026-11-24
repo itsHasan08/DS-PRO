@@ -122,17 +122,10 @@ data class ProtectionStepResult(
     val detail: String,
 )
 
-data class SavedApkLocation(
-    val folderDisplay: String,
-    val fileName: String,
-    val savedUri: String?,
-)
-
 data class ProtectionRunResult(
     val outputApkPath: String?,
     val outputSizeBytes: Long,
     val isValidBuild: Boolean,
     val summary: String,
     val steps: List<ProtectionStepResult>,
-    val savedLocation: SavedApkLocation? = null,
 )

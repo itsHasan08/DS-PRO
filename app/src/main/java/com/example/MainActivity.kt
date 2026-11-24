@@ -28,7 +28,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(Color.WHITE, Color.WHITE),
-            navigationBarStyle = SystemBarStyle.light(Color.WHITE, Color.WHITE),
+            navigationBarStyle = SystemBarStyle.light(
+                Color.rgb(241, 245, 251),
+                Color.rgb(241, 245, 251),
+            ),
         )
         setContent {
             DsProTheme {

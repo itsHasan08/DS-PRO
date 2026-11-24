@@ -27,8 +27,11 @@ data class DsProUiState(
     val config: ProtectionConfig = ProtectionConfig(),
     val isProcessing: Boolean = false,
     val progress: Int = 0,
+    val activeStageDetail: String? = null,
     val steps: List<ProtectionStepResult> = emptyList(),
     val runResult: ProtectionRunResult? = null,
+    val isExported: Boolean = false,
+    val exportedSizeBytes: Long? = null,
     val statusMessage: String? = null,
 ) {
     val hasActiveProtection: Boolean
@@ -61,6 +64,9 @@ class MainViewModel(
                     runResult = null,
                     steps = emptyList(),
                     progress = 0,
+                    activeStageDetail = null,
+                    isExported = false,
+                    exportedSizeBytes = null,
                 )
             }
             analyzerEngine.loadApkFromUri(uri)
@@ -102,8 +108,11 @@ class MainViewModel(
                     isRefreshing = true,
                     apkError = null,
                     progress = 0,
+                    activeStageDetail = null,
                     steps = emptyList(),
                     runResult = null,
+                    isExported = false,
+                    exportedSizeBytes = null,
                 )
             }
 
@@ -176,18 +185,28 @@ class MainViewModel(
             _uiState.update {
                 it.copy(
                     isProcessing = true,
-                    progress = 5,
+                    progress = 4,
+                    activeStageDetail = "Preparing protection pipeline...",
                     steps = emptyList(),
                     runResult = null,
+                    isExported = false,
+                    exportedSizeBytes = null,
                 )
             }
-            val result = protectionProcessor.processApk(apk, state.config) { pct, steps ->
-                _uiState.update { it.copy(progress = pct, steps = steps) }
+            val result = protectionProcessor.processApk(apk, state.config) { pct, stageDetail, steps ->
+                _uiState.update {
+                    it.copy(
+                        progress = pct,
+                        activeStageDetail = stageDetail,
+                        steps = steps,
+                    )
+                }
             }
             _uiState.update {
                 it.copy(
                     isProcessing = false,
                     progress = 100,
+                    activeStageDetail = result.summary,
                     steps = result.steps,
                     runResult = result,
                     statusMessage = result.summary,
@@ -202,12 +221,16 @@ class MainViewModel(
             protectionProcessor.exportUnsignedApk(path, destinationUri)
                 .onSuccess { size ->
                     _uiState.update {
-                        it.copy(statusMessage = "Exported copy (${formatBytes(size)}).")
+                        it.copy(
+                            isExported = true,
+                            exportedSizeBytes = size,
+                            statusMessage = "APK saved (${formatBytes(size)}).",
+                        )
                     }
                 }
                 .onFailure { err ->
                     _uiState.update {
-                        it.copy(statusMessage = "Export failed: ${err.message}")
+                        it.copy(statusMessage = "Save failed: ${err.message}")
                     }
                 }
         }

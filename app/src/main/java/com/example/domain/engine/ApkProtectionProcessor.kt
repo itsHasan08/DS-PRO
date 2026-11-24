@@ -6,7 +6,6 @@ import com.example.domain.model.ApkAnalysisResult
 import com.example.domain.model.ProtectionConfig
 import com.example.domain.model.ProtectionRunResult
 import com.example.domain.model.ProtectionStepResult
-import com.example.domain.model.SavedApkLocation
 import com.example.domain.model.StepStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -59,7 +58,7 @@ class ApkProtectionProcessor(
     suspend fun processApk(
         analysis: ApkAnalysisResult,
         config: ProtectionConfig,
-        onProgress: suspend (Int, List<ProtectionStepResult>) -> Unit,
+        onProgress: (Int, String, List<ProtectionStepResult>) -> Unit,
     ): ProtectionRunResult = withContext(Dispatchers.IO) {
         val steps = mutableListOf<ProtectionStepResult>()
         val inputFile = File(analysis.cachedApkPath)
@@ -71,7 +70,7 @@ class ApkProtectionProcessor(
                 status = StepStatus.FAILED,
                 detail = "Selected APK file is no longer accessible.",
             )
-            onProgress(100, steps.toList())
+            onProgress(100, "Input APK missing.", steps.toList())
             return@withContext ProtectionRunResult(
                 outputApkPath = null,
                 outputSizeBytes = 0L,
@@ -88,7 +87,7 @@ class ApkProtectionProcessor(
                 status = StepStatus.FAILED,
                 detail = "Cannot pin signature: input APK has no signing certificate.",
             )
-            onProgress(100, steps.toList())
+            onProgress(100, "Signature Pinning requires a signed APK.", steps.toList())
             return@withContext ProtectionRunResult(
                 outputApkPath = null,
                 outputSizeBytes = 0L,
@@ -97,6 +96,8 @@ class ApkProtectionProcessor(
                 steps = steps.toList(),
             )
         }
+
+        onProgress(8, "Loading protection payloads...", steps.toList())
 
         val guardDexBytes = if (config.requiresGuardDex) {
             runCatching {
@@ -108,7 +109,7 @@ class ApkProtectionProcessor(
                     status = StepStatus.FAILED,
                     detail = err.message ?: "Missing ds_pro_guard.dex payload.",
                 )
-                onProgress(100, steps.toList())
+                onProgress(100, "Guard DEX asset unavailable.", steps.toList())
                 return@withContext ProtectionRunResult(null, 0L, false, "Guard DEX asset unavailable.", steps.toList())
             }
         } else {
@@ -125,7 +126,7 @@ class ApkProtectionProcessor(
                     status = StepStatus.FAILED,
                     detail = err.message ?: "Missing ds_pro_core.dex payload.",
                 )
-                onProgress(100, steps.toList())
+                onProgress(100, "DS PRO core asset unavailable.", steps.toList())
                 return@withContext ProtectionRunResult(null, 0L, false, "DS PRO core asset unavailable.", steps.toList())
             }
         } else {
@@ -144,7 +145,7 @@ class ApkProtectionProcessor(
             status = StepStatus.SUCCESS,
             detail = "Verified ${analysis.fileName} (${analysis.totalEntries} entries, ${analysis.dexCount} DEX).",
         )
-        onProgress(20, steps.toList())
+        onProgress(16, "Inspecting APK structure...", steps.toList())
 
         val transformResult = runCatching {
             transformApkArchive(
@@ -154,6 +155,9 @@ class ApkProtectionProcessor(
                 config = config,
                 guardDexBytes = guardDexBytes,
                 coreDexBytes = coreDexBytes,
+                onStageProgress = { pct, stageLabel ->
+                    onProgress(pct, stageLabel, steps.toList())
+                },
             )
         }
 
@@ -162,7 +166,7 @@ class ApkProtectionProcessor(
             val err = transformResult.exceptionOrNull()?.message ?: "APK protection failed."
             outputFile.delete()
             steps += ProtectionStepResult("build", "APK Protection", StepStatus.FAILED, err)
-            onProgress(100, steps.toList())
+            onProgress(100, err, steps.toList())
             return@withContext ProtectionRunResult(null, 0L, false, err, steps.toList())
         }
 
@@ -178,7 +182,6 @@ class ApkProtectionProcessor(
                 detail = parts.joinToString(" | "),
             )
         }
-        onProgress(38, steps.toList())
 
         if (config.disableDebuggable || config.disableBackup || config.requiresGuardDex || config.requiresCoreDexContainer || stats.protectionIdentifierEmbedded) {
             val manifestActions = buildList {
@@ -195,7 +198,6 @@ class ApkProtectionProcessor(
                 detail = manifestActions.joinToString(", "),
             )
         }
-        onProgress(55, steps.toList())
 
         if (config.requiresRuntimeGuard) {
             val guards = buildList {
@@ -214,7 +216,6 @@ class ApkProtectionProcessor(
                 detail = "${stats.injectedGuardDexName ?: "classes2.dex"} -> encrypted policy (${guards.joinToString(", ")})",
             )
         }
-        onProgress(70, steps.toList())
 
         if (config.stripDexDebug || config.controlFlowObfuscation || config.resourceEncryption) {
             val binaryParts = buildList {
@@ -229,7 +230,8 @@ class ApkProtectionProcessor(
                 detail = binaryParts.joinToString(" | "),
             )
         }
-        onProgress(82, steps.toList())
+
+        onProgress(95, "Verifying output APK integrity...", steps.toList())
 
         val (valid, verifyDetail) = verifyOutputApk(outputFile)
         steps += ProtectionStepResult(
@@ -239,41 +241,23 @@ class ApkProtectionProcessor(
             detail = verifyDetail,
         )
 
-        var savedLocation: SavedApkLocation? = null
-        if (valid) {
-            fileStorageService.saveProtectedApk(outputFile, analysis.packageName)
-                .onSuccess { loc ->
-                    savedLocation = loc
-                    steps += ProtectionStepResult(
-                        id = "save",
-                        title = "Saved to ${ApkFileStorageService.PROTECTED_FOLDER_NAME}",
-                        status = StepStatus.SUCCESS,
-                        detail = "${loc.folderDisplay}/${loc.fileName}",
-                    )
-                }
-                .onFailure { err ->
-                    steps += ProtectionStepResult(
-                        id = "save",
-                        title = "Storage Save",
-                        status = StepStatus.FAILED,
-                        detail = err.message ?: "Could not save to ${ApkFileStorageService.PROTECTED_FOLDER_NAME}.",
-                    )
-                }
-        } else {
+        if (!valid) {
             outputFile.delete()
         }
 
-        onProgress(100, steps.toList())
+        val finalMessage = if (valid) {
+            "Ready to save (${formatBytes(outputFile.length())})"
+        } else {
+            verifyDetail
+        }
+        onProgress(100, finalMessage, steps.toList())
 
         ProtectionRunResult(
             outputApkPath = if (valid) outputFile.absolutePath else null,
             outputSizeBytes = if (valid) outputFile.length() else 0L,
             isValidBuild = valid,
-            summary = savedLocation?.takeIf { valid }?.let { loc ->
-                "Saved to ${loc.folderDisplay}/${loc.fileName}"
-            } ?: verifyDetail,
+            summary = finalMessage,
             steps = steps.toList(),
-            savedLocation = savedLocation,
         )
     }
 
@@ -309,6 +293,7 @@ class ApkProtectionProcessor(
             config: ProtectionConfig,
             guardDexBytes: ByteArray? = null,
             coreDexBytes: ByteArray? = null,
+            onStageProgress: ((Int, String) -> Unit)? = null,
         ): ArchiveTransformStats {
             if (config.requiresGuardDex) {
                 require(guardDexBytes != null && DexPatcher.isValidDex(guardDexBytes)) {
@@ -367,11 +352,29 @@ class ApkProtectionProcessor(
                     }
                     val replaceGuardArtifacts = inputHasGuardProvider && config.requiresGuardDex
 
+                    onStageProgress?.invoke(22, "Streaming entries & hardening DEX...")
+                    val totalEntries = zipIn.size().coerceAtLeast(1)
+                    var processedEntries = 0
+                    var lastReportedPct = 22
+
                     val entries = zipIn.entries()
                     while (entries.hasMoreElements()) {
                         val entry = entries.nextElement()
+                        processedEntries++
                         if (entry.isDirectory) continue
                         val name = entry.name
+
+                        val streamPct = 22 + ((processedEntries * 28) / totalEntries).coerceIn(0, 28)
+                        if (streamPct - lastReportedPct >= 4) {
+                            lastReportedPct = streamPct
+                            onStageProgress?.invoke(
+                                streamPct,
+                                when {
+                                    collectedDex.isNotEmpty() -> "Hardening DEX (${collectedDex.size}) & resources..."
+                                    else -> "Reading archive entries ($processedEntries/$totalEntries)..."
+                                },
+                            )
+                        }
 
                         if (isV1SignatureEntry(name) ||
                             name == "assets/libjiagu.so" ||
@@ -457,6 +460,8 @@ class ApkProtectionProcessor(
                         }
                     }
 
+                    onStageProgress?.invoke(54, "Patching binary AndroidManifest.xml...")
+
                     val rawManifest = manifestBytes ?: rawManifestInitial
 
                     val shouldEmbedIdentifier = config.activeToggleCount > 0
@@ -497,6 +502,7 @@ class ApkProtectionProcessor(
                     }
 
                     if (config.resourceEncryption && encryptedResourceAssets.isNotEmpty()) {
+                        onStageProgress?.invoke(63, "Encrypting ${encryptedResourceAssets.size} resource assets...")
                         val resVaultBytes = buildEncryptedResourceVault(
                             rng = SecureRandom(),
                             packageName = effectivePackageName,
@@ -512,6 +518,7 @@ class ApkProtectionProcessor(
                     val sortedOriginalDex = collectedDex.sortedBy { parseDexIndex(it.first) }
                     if (config.requiresCoreDexContainer && coreDexBytes != null) {
                         require(sortedOriginalDex.isNotEmpty()) { "No classes.dex found to protect." }
+                        onStageProgress?.invoke(72, "Encrypting ${sortedOriginalDex.size} DEX & string tables (AES-GCM)...")
 
                         val rng = SecureRandom()
                         val sha = MessageDigest.getInstance("SHA-256")
@@ -564,6 +571,7 @@ class ApkProtectionProcessor(
                             }
                         }
                     } else {
+                        onStageProgress?.invoke(72, "Writing hardened DEX files...")
                         var maxDexIndex = 0
                         sortedOriginalDex.forEach { (dexName, dexBytes) ->
                             maxDexIndex = maxOf(maxDexIndex, parseDexIndex(dexName))
@@ -592,6 +600,7 @@ class ApkProtectionProcessor(
                     }
 
                     if (config.requiresGuardDex) {
+                        onStageProgress?.invoke(85, "Sealing encrypted Runtime Guard policy...")
                         val encryptedPolicyBytes = buildEncryptedGuardPolicy(
                             rng = SecureRandom(),
                             packageName = effectivePackageName,
@@ -603,6 +612,7 @@ class ApkProtectionProcessor(
                         writeZipBytes(countingOut, zipOut, written, guardAssetName, encryptedPolicyBytes, keepStored = true)
                     }
 
+                    onStageProgress?.invoke(91, "Finalizing aligned APK archive...")
                     zipOut.flush()
                 }
             }

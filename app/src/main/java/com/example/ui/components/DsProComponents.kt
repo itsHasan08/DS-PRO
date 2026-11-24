@@ -1,7 +1,12 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
@@ -27,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
@@ -38,10 +44,10 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -51,14 +57,19 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -80,6 +91,7 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.ErrorTint
 import com.example.ui.theme.MonoCodeStyle
 import com.example.ui.theme.ProBlue
+import com.example.ui.theme.ProBlueBright
 import com.example.ui.theme.ProBlueDark
 import com.example.ui.theme.ProBlueTint
 import com.example.ui.theme.PureWhite
@@ -88,7 +100,10 @@ import com.example.ui.theme.SlateMuted
 import com.example.ui.theme.SuccessEmerald
 import com.example.ui.theme.SuccessTint
 import com.example.ui.theme.TealAccent
+import com.example.ui.theme.TealBright
 import com.example.ui.theme.TealTint
+import kotlinx.coroutines.delay
+import java.util.Locale
 
 @Composable
 fun DsProTopBar(
@@ -122,7 +137,7 @@ fun DsProTopBar(
                             .clip(RoundedCornerShape(10.dp))
                             .background(
                                 Brush.linearGradient(
-                                    colors = listOf(ProBlue, ProBlueDark),
+                                    colors = listOf(ProBlueBright, ProBlue, ProBlueDark),
                                 ),
                             ),
                         contentAlignment = Alignment.Center,
@@ -194,8 +209,9 @@ fun SectionCard(
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        color = SectionGrey,
-        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.22f)),
+        color = PureWhite,
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.24f)),
+        shadowElevation = 1.dp,
     ) {
         Column(
             modifier = Modifier
@@ -310,8 +326,11 @@ fun GridToggleTile(
             .clickable(role = Role.Switch) { onCheckedChange(!checked) }
             .testTag(testTag),
         shape = RoundedCornerShape(12.dp),
-        color = if (checked) accentTint.copy(alpha = 0.7f) else PureWhite,
-        border = BorderStroke(1.dp, if (checked) accentColor.copy(alpha = 0.5f) else BorderSubtle),
+        color = if (checked) accentTint else PureWhite,
+        border = BorderStroke(
+            width = if (checked) 1.5.dp else 1.dp,
+            color = if (checked) accentColor.copy(alpha = 0.65f) else BorderSubtle,
+        ),
     ) {
         Row(
             modifier = Modifier
@@ -368,8 +387,11 @@ fun GridToggleTile(
 fun ProtectionPipelineCard(
     isProcessing: Boolean,
     progress: Int,
+    activeStageDetail: String?,
     steps: List<ProtectionStepResult>,
     runResult: ProtectionRunResult?,
+    isExported: Boolean,
+    exportedSizeBytes: Long?,
     onExportClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -381,16 +403,63 @@ fun ProtectionPipelineCard(
         isComplete -> SuccessEmerald
         else -> ProBlue
     }
-    val bannerBg = when {
-        hasFailure -> ErrorTint
-        isComplete -> SuccessTint
-        else -> ProBlueTint
+    val secondaryAccent = when {
+        hasFailure -> ErrorRed
+        isComplete -> TealBright
+        else -> ProBlueBright
+    }
+    val bannerBrush = when {
+        hasFailure -> Brush.linearGradient(listOf(ErrorTint, PureWhite))
+        isComplete -> Brush.linearGradient(listOf(SuccessTint, TealTint))
+        else -> Brush.linearGradient(listOf(ProBlueTint, TealTint.copy(alpha = 0.7f)))
     }
     val animatedProgress by animateFloatAsState(
         targetValue = (progress.coerceIn(0, 100)) / 100f,
-        animationSpec = tween(durationMillis = 280),
+        animationSpec = tween(durationMillis = 240),
         label = "pipeline_progress",
     )
+
+    var elapsedMs by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(isProcessing) {
+        if (isProcessing) {
+            val started = System.currentTimeMillis()
+            elapsedMs = 0L
+            while (true) {
+                delay(100L)
+                elapsedMs = System.currentTimeMillis() - started
+            }
+        }
+    }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "pipeline_live")
+    val spinAngle by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1000, easing = LinearEasing),
+        ),
+        label = "sync_spin",
+    )
+    val shimmerOffset by infiniteTransition.animateFloat(
+        initialValue = -0.35f,
+        targetValue = 1.35f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "progress_shimmer",
+    )
+
+    val phaseIndex = when {
+        hasFailure -> -1
+        isComplete || progress >= 100 -> 5
+        progress >= 91 -> 4
+        progress >= 63 -> 3
+        progress >= 54 -> 2
+        progress >= 22 -> 1
+        else -> 0
+    }
+    val phaseLabels = remember { listOf("Scan", "Harden", "Manifest", "Encrypt", "Verify") }
 
     Surface(
         modifier = modifier
@@ -398,18 +467,18 @@ fun ProtectionPipelineCard(
             .testTag("protection_pipeline_card"),
         shape = RoundedCornerShape(18.dp),
         color = PureWhite,
-        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f)),
-        shadowElevation = 2.dp,
+        border = BorderStroke(1.2.dp, accentColor.copy(alpha = 0.38f)),
+        shadowElevation = 3.dp,
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Top Status Banner
+            // Top Animated Status Header
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(bannerBg)
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                    .background(bannerBrush)
+                    .padding(horizontal = 14.dp, vertical = 14.dp),
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -422,8 +491,8 @@ fun ProtectionPipelineCard(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(11.dp))
                                     .background(PureWhite),
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -435,52 +504,134 @@ fun ProtectionPipelineCard(
                                     },
                                     contentDescription = null,
                                     tint = accentColor,
-                                    modifier = Modifier.size(20.dp),
+                                    modifier = Modifier
+                                        .size(21.dp)
+                                        .then(if (isProcessing) Modifier.rotate(spinAngle) else Modifier),
                                 )
                             }
-                            Column {
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text(
                                     text = when {
                                         hasFailure -> "Protection Failed"
                                         isComplete -> "DS PRO Protection Applied"
-                                        else -> "Applying DS PRO Protection..."
+                                        else -> "Hardening APK..."
                                     },
                                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                     color = CharcoalText,
                                 )
                                 Text(
                                     text = when {
-                                        hasFailure -> "Review failed stage below"
-                                        isComplete -> "${steps.size} stages verified cleanly"
-                                        else -> "${steps.size} stage(s) processed"
+                                        hasFailure -> activeStageDetail ?: "Review failed stage below"
+                                        isComplete -> "${steps.size} stages verified • ${formatDuration(elapsedMs)}"
+                                        else -> activeStageDetail ?: "Initializing protection engine..."
                                     },
                                     style = MaterialTheme.typography.labelSmall,
+                                    color = if (hasFailure) ErrorRed else SlateMuted,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        Column(
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            StatusPill(
+                                text = "${progress.coerceIn(0, 100)}%",
+                                containerColor = PureWhite,
+                                contentColor = accentColor,
+                            )
+                            if (elapsedMs > 0L) {
+                                Text(
+                                    text = formatDuration(elapsedMs),
+                                    style = MonoCodeStyle,
                                     color = SlateMuted,
                                 )
                             }
                         }
-                        StatusPill(
-                            text = "${progress.coerceIn(0, 100)}%",
-                            containerColor = PureWhite,
-                            contentColor = accentColor,
-                        )
                     }
 
-                    LinearProgressIndicator(
-                        progress = { animatedProgress },
+                    // Advanced Gradient Shimmer Progress Track
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(50)),
-                        color = accentColor,
-                        trackColor = PureWhite.copy(alpha = 0.85f),
-                        strokeCap = StrokeCap.Round,
-                    )
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(PureWhite.copy(alpha = 0.85f)),
+                    ) {
+                        val fillFraction = animatedProgress.coerceIn(0f, 1f)
+                        if (fillFraction > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(fillFraction)
+                                    .fillMaxHeight()
+                                    .clip(RoundedCornerShape(50))
+                                    .background(
+                                        brush = if (isProcessing) {
+                                            Brush.linearGradient(
+                                                colors = listOf(
+                                                    accentColor,
+                                                    secondaryAccent,
+                                                    PureWhite.copy(alpha = 0.72f),
+                                                    secondaryAccent,
+                                                    accentColor,
+                                                ),
+                                                start = Offset(shimmerOffset * 600f - 180f, 0f),
+                                                end = Offset(shimmerOffset * 600f + 180f, 0f),
+                                            )
+                                        } else {
+                                            Brush.horizontalGradient(
+                                                colors = listOf(accentColor, secondaryAccent),
+                                            )
+                                        },
+                                    ),
+                            )
+                        }
+                    }
+
+                    // Compact 5-Stage Pipeline Stepper
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        phaseLabels.forEachIndexed { idx, label ->
+                            val done = !hasFailure && phaseIndex > idx
+                            val active = isProcessing && !hasFailure && phaseIndex == idx
+                            val chipBg = when {
+                                done -> SuccessTint
+                                active -> PureWhite
+                                else -> PureWhite.copy(alpha = 0.55f)
+                            }
+                            val chipFg = when {
+                                done -> SuccessEmerald
+                                active -> ProBlue
+                                else -> SlateMuted
+                            }
+                            Surface(
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp),
+                                color = chipBg,
+                                border = if (active) BorderStroke(1.dp, ProBlue.copy(alpha = 0.55f)) else null,
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = if (active || done) FontWeight.Bold else FontWeight.Medium,
+                                    ),
+                                    color = chipFg,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(vertical = 4.dp, horizontal = 2.dp),
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
-            // Vertical Connected Timeline
-            if (steps.isNotEmpty()) {
+            // Vertical Connected Timeline + Live Active Row
+            if (steps.isNotEmpty() || isProcessing) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -493,14 +644,19 @@ fun ProtectionPipelineCard(
                         ) {
                             PipelineTimelineStep(
                                 step = step,
-                                isLast = index == steps.lastIndex,
+                                isLast = !isProcessing && index == steps.lastIndex,
                             )
                         }
+                    }
+                    if (isProcessing) {
+                        LiveActiveTimelineRow(
+                            detail = activeStageDetail ?: "Working...",
+                        )
                     }
                 }
             }
 
-            // Integrated Saved APK Vault Card
+            // Manual Save Action Card (Zero auto-save — user saves explicitly once)
             if (runResult != null && runResult.isValidBuild) {
                 HorizontalDivider(thickness = 1.dp, color = BorderSubtle)
                 Column(
@@ -523,7 +679,7 @@ fun ProtectionPipelineCard(
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.Folder,
+                                imageVector = if (isExported) Icons.Filled.CheckCircle else Icons.Filled.Folder,
                                 contentDescription = null,
                                 tint = SuccessEmerald,
                                 modifier = Modifier.size(20.dp),
@@ -531,19 +687,23 @@ fun ProtectionPipelineCard(
                         }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Output APK Ready (${formatBytes(runResult.outputSizeBytes)})",
+                                text = if (isExported) {
+                                    "APK Saved (${formatBytes(exportedSizeBytes ?: runResult.outputSizeBytes)})"
+                                } else {
+                                    "Protected APK Ready (${formatBytes(runResult.outputSizeBytes)})"
+                                },
                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                 color = CharcoalText,
                             )
-                            runResult.savedLocation?.let { loc ->
-                                Text(
-                                    text = "${loc.folderDisplay}/${loc.fileName}",
-                                    style = MonoCodeStyle,
-                                    color = SlateMuted,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
+                            Text(
+                                text = if (isExported) {
+                                    "Saved to your selected folder. Tap below only if you want another copy."
+                                } else {
+                                    "Tap Save APK below to choose where to save the protected file."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = SlateMuted,
+                            )
                         }
                     }
 
@@ -555,7 +715,7 @@ fun ProtectionPipelineCard(
                             .testTag("export_apk_button"),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = TealAccent,
+                            containerColor = if (isExported) TealAccent else SuccessEmerald,
                             contentColor = PureWhite,
                         ),
                     ) {
@@ -565,12 +725,78 @@ fun ProtectionPipelineCard(
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Save Copy As...", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = if (isExported) "Save Another Copy" else "Save APK",
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun LiveActiveTimelineRow(detail: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .width(24.dp)
+                .padding(top = 2.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = ProBlue,
+            )
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(bottom = 2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = "In Progress",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = ProBlue,
+                )
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(ProBlueTint)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = "RUN",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ProBlue,
+                    )
+                }
+            }
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = SlateMuted,
+            )
+        }
+    }
+}
+
+private fun formatDuration(ms: Long): String {
+    val secs = ms / 1000.0
+    return String.format(Locale.US, "%.1fs", secs)
 }
 
 @Composable

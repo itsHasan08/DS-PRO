@@ -1311,5 +1311,69 @@ class ExampleUnitTest {
             assertEquals(needsCoreDex, cfg.requiresCoreDexContainer)
         }
     }
+
+    @Test
+    fun `transform emits monotonically increasing stage progress and manual export state defaults clean`() {
+        val tempDir = Files.createTempDirectory("dspro_stage_progress_test").toFile()
+        try {
+            val inputApk = File(tempDir, "target.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.stage.progress", debuggable = true, allowBackup = true)
+            val appDex = buildSyntheticDexWithStrings("Lcom/stage/progress/App;", "https://stage.example/api")
+            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/core/DsProApplication;")
+            val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("assets/data.json"))
+                zip.write("""{"ok":true}""".toByteArray())
+                zip.closeEntry()
+            }
+
+            val stages = mutableListOf<Pair<Int, String>>()
+            val outApk = File(tempDir, "out.apk")
+            ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = outApk,
+                analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.stage.progress"),
+                config = ProtectionConfig(
+                    detectRoot = true,
+                    dsProDexEncryption = true,
+                    stringEncryption = true,
+                    resourceEncryption = true,
+                    disableDebuggable = true,
+                ),
+                guardDexBytes = guardDex,
+                coreDexBytes = coreDex,
+                onStageProgress = { pct, label -> stages += pct to label },
+            )
+
+            assertTrue("Expected at least 5 live stage callbacks", stages.size >= 5)
+            for (i in 1 until stages.size) {
+                assertTrue(
+                    "Progress must never decrease: ${stages[i - 1]} -> ${stages[i]}",
+                    stages[i].first >= stages[i - 1].first,
+                )
+            }
+            assertTrue(stages.all { it.second.isNotBlank() })
+
+            val state = DsProUiState(
+                selectedApkUri = "content://demo.apk",
+                selectedApk = sampleApk(),
+                isProcessing = true,
+                progress = 72,
+                activeStageDetail = stages.last().second,
+            )
+            assertFalse(state.isExported)
+            assertEquals(null, state.exportedSizeBytes)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
 }
+
 
