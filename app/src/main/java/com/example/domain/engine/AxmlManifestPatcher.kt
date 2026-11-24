@@ -9,6 +9,7 @@ data class AxmlPatchOptions(
     val disableBackup: Boolean = false,
     val injectGuardProvider: Boolean = false,
     val enableCoreProtection: Boolean = false,
+    val protectionIdentifier: String = "",
     val packageName: String = "",
 )
 
@@ -18,6 +19,7 @@ data class AxmlPatchResult(
     val backupDisabled: Boolean,
     val guardProviderInjected: Boolean,
     val coreProtectionInjected: Boolean = false,
+    val protectionIdentifierEmbedded: Boolean = false,
     val originalAppClass: String = "",
     val originalFactoryClass: String = "",
     val manifestPackageName: String = "",
@@ -29,6 +31,7 @@ data class AxmlSecuritySummary(
     val allowsBackup: Boolean,
     val hasGuardProvider: Boolean,
     val hasCoreProtection: Boolean,
+    val protectionIdentifier: String? = null,
 )
 
 /**
@@ -54,12 +57,15 @@ object AxmlManifestPatcher {
     const val GUARD_PROVIDER_CLASS = "com.dspro.guard.DsProGuardProvider"
     const val CORE_APP_CLASS = "com.dspro.core.DsProApplication"
     const val CORE_FACTORY_CLASS = "com.dspro.core.DsProComponentFactory"
+    const val PROTECTION_IDENTIFIER_META_NAME = "com.dspro.protection.IDENTIFIER"
+    const val PROTECTION_IDENTIFIER_VALUE = "DS 专业版"
 
     private const val ATTR_NAME = 0x01010003
     private const val ATTR_DEBUGGABLE = 0x0101000f
     private const val ATTR_EXPORTED = 0x01010010
     private const val ATTR_MULTIPROCESS = 0x01010013
     private const val ATTR_AUTHORITIES = 0x01010018
+    private const val ATTR_VALUE = 0x01010024
     private const val ATTR_ALLOW_BACKUP = 0x01010280
     private const val ATTR_INIT_ORDER = 0x010103a8
     private const val ATTR_APP_COMPONENT_FACTORY = 0x0101057a
@@ -232,21 +238,31 @@ object AxmlManifestPatcher {
                 appClassAttr == CORE_APP_CLASS ||
                     getStringAttr(doc, app, ATTR_APP_COMPONENT_FACTORY) == CORE_FACTORY_CLASS
                 )
+            val protectionId = doc.chunks.filterIsInstance<XmlChunk.StartElement>()
+                .firstOrNull { elem ->
+                    doc.strings.getOrNull(elem.nameIdx) == "meta-data" &&
+                        getAttrStringByNameOrResId(doc, elem, "name", ATTR_NAME) == PROTECTION_IDENTIFIER_META_NAME
+                }?.let { elem ->
+                    getAttrStringByNameOrResId(doc, elem, "value", ATTR_VALUE).takeIf { it.isNotBlank() }
+                }
             AxmlSecuritySummary(
                 packageName = pkg,
                 isDebuggable = dbg,
                 allowsBackup = bkp,
                 hasGuardProvider = hasGuard,
                 hasCoreProtection = hasCore,
+                protectionIdentifier = protectionId,
             )
         }.getOrNull()
     }
 
     fun patch(axmlBytes: ByteArray, options: AxmlPatchOptions): AxmlPatchResult {
+        val identifier = options.protectionIdentifier.trim()
         if (!options.disableDebuggable &&
             !options.disableBackup &&
             !options.injectGuardProvider &&
-            !options.enableCoreProtection
+            !options.enableCoreProtection &&
+            identifier.isEmpty()
         ) {
             return AxmlPatchResult(
                 manifestBytes = axmlBytes,
@@ -254,6 +270,7 @@ object AxmlManifestPatcher {
                 backupDisabled = false,
                 guardProviderInjected = false,
                 coreProtectionInjected = false,
+                protectionIdentifierEmbedded = false,
                 manifestPackageName = resolvePackageName(axmlBytes),
             )
         }
@@ -271,6 +288,7 @@ object AxmlManifestPatcher {
         var backupDisabled = false
         var guardProviderInjected = false
         var coreProtectionInjected = false
+        var protectionIdentifierEmbedded = false
         var originalAppClass = ""
         var originalFactoryClass = ""
 
@@ -407,12 +425,72 @@ object AxmlManifestPatcher {
             guardProviderInjected = true
         }
 
+        if (identifier.isNotEmpty()) {
+            val nameAttrIdx = doc.ensureResourceAttrString("name", ATTR_NAME)
+            val valueAttrIdx = doc.ensureResourceAttrString("value", ATTR_VALUE)
+            val androidNsIdx = ensureAndroidNsIndex(doc)
+            val metaValueValIdx = doc.ensurePlainString(identifier)
+
+            val existingMeta = doc.chunks.filterIsInstance<XmlChunk.StartElement>().firstOrNull { elem ->
+                doc.strings.getOrNull(elem.nameIdx) == "meta-data" &&
+                    getAttrStringByNameOrResId(doc, elem, "name", ATTR_NAME) == PROTECTION_IDENTIFIER_META_NAME
+            }
+            if (existingMeta != null) {
+                setOrInsertStringAttr(doc, existingMeta, androidNsIdx, valueAttrIdx, ATTR_VALUE, metaValueValIdx)
+            } else {
+                val metaDataTagIdx = doc.ensurePlainString("meta-data")
+                val metaNameValIdx = doc.ensurePlainString(PROTECTION_IDENTIFIER_META_NAME)
+                val metaStart = XmlChunk.StartElement(
+                    lineNumber = appElem.lineNumber,
+                    commentIdx = -1,
+                    nsIdx = -1,
+                    nameIdx = metaDataTagIdx,
+                    attrStart = 20,
+                    attrSize = 20,
+                    idIndex = 0,
+                    classIndex = 0,
+                    styleIndex = 0,
+                    attributes = mutableListOf(
+                        AxmlAttribute(
+                            nsIdx = androidNsIdx,
+                            nameIdx = nameAttrIdx,
+                            rawValueIdx = metaNameValIdx,
+                            valueSize = 8,
+                            res0 = 0,
+                            dataType = TYPE_STRING,
+                            data = metaNameValIdx,
+                        ),
+                        AxmlAttribute(
+                            nsIdx = androidNsIdx,
+                            nameIdx = valueAttrIdx,
+                            rawValueIdx = metaValueValIdx,
+                            valueSize = 8,
+                            res0 = 0,
+                            dataType = TYPE_STRING,
+                            data = metaValueValIdx,
+                        ),
+                    ),
+                )
+                val metaEnd = XmlChunk.EndElement(
+                    lineNumber = appElem.lineNumber,
+                    commentIdx = -1,
+                    nsIdx = -1,
+                    nameIdx = metaDataTagIdx,
+                )
+                val currentAppIdx = doc.chunks.indexOf(appElem)
+                doc.chunks.add(currentAppIdx + 1, metaEnd)
+                doc.chunks.add(currentAppIdx + 1, metaStart)
+            }
+            protectionIdentifierEmbedded = true
+        }
+
         return AxmlPatchResult(
             manifestBytes = encode(doc),
             debuggableDisabled = debuggableDisabled,
             backupDisabled = backupDisabled,
             guardProviderInjected = guardProviderInjected,
             coreProtectionInjected = coreProtectionInjected,
+            protectionIdentifierEmbedded = protectionIdentifierEmbedded,
             originalAppClass = originalAppClass,
             originalFactoryClass = originalFactoryClass,
             manifestPackageName = manifestPkg,
@@ -555,6 +633,18 @@ object AxmlManifestPatcher {
     ): String {
         val attr = element.attributes.firstOrNull {
             doc.resourceMap.getOrNull(it.nameIdx) == resId
+        } ?: return ""
+        return if (attr.dataType == TYPE_STRING) doc.strings.getOrNull(attr.data).orEmpty() else ""
+    }
+
+    private fun getAttrStringByNameOrResId(
+        doc: ParsedAxml,
+        element: XmlChunk.StartElement,
+        attrName: String,
+        resId: Int,
+    ): String {
+        val attr = element.attributes.firstOrNull {
+            doc.resourceMap.getOrNull(it.nameIdx) == resId || doc.strings.getOrNull(it.nameIdx) == attrName
         } ?: return ""
         return if (attr.dataType == TYPE_STRING) doc.strings.getOrNull(attr.data).orEmpty() else ""
     }

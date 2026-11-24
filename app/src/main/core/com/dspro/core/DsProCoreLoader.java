@@ -4,18 +4,25 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
+import android.content.res.AssetManager;
+import android.content.res.Resources;
+import android.content.res.loader.ResourcesLoader;
+import android.content.res.loader.ResourcesProvider;
 import android.os.Build;
 import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import dalvik.system.BaseDexClassLoader;
 import dalvik.system.InMemoryDexClassLoader;
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStream;
 import java.lang.reflect.Array;
@@ -24,11 +31,14 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Locale;
 import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.zip.Inflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -38,9 +48,9 @@ import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Decrypts V5 self-bound AES-256-GCM encrypted DEX container in direct memory,
- * verifies anti-dump/anti-hook/virtual-container environment before decryption and via a
- * burst-polling live watchdog, wipes plaintext DEX buffers immediately after ART loading,
- * and enforces guard anti-removal binding without breaking multi-provider init.
+ * unlocks per-DEX encrypted literal string tables and verifies DEX SHA-256 integrity
+ * inside wiped DirectByteBuffers, dynamically mounts encrypted asset vaults (dspro_res.bin),
+ * and runs burst-polling anti-dump / anti-virtualizer watchdogs.
  */
 final class DsProCoreLoader {
 
@@ -50,19 +60,25 @@ final class DsProCoreLoader {
         final String originalFactoryClass;
         final boolean requireGuard;
         final boolean antiDumpEnabled;
+        final boolean stringEncryptionEnabled;
+        final String[] dexPayloadDigests;
 
         CoreMetadata(
             int dexCount,
             String originalAppClass,
             String originalFactoryClass,
             boolean requireGuard,
-            boolean antiDumpEnabled
+            boolean antiDumpEnabled,
+            boolean stringEncryptionEnabled,
+            String[] dexPayloadDigests
         ) {
             this.dexCount = dexCount;
             this.originalAppClass = originalAppClass;
             this.originalFactoryClass = originalFactoryClass;
             this.requireGuard = requireGuard;
             this.antiDumpEnabled = antiDumpEnabled;
+            this.stringEncryptionEnabled = stringEncryptionEnabled;
+            this.dexPayloadDigests = dexPayloadDigests != null ? dexPayloadDigests : new String[0];
         }
     }
 
@@ -86,6 +102,7 @@ final class DsProCoreLoader {
 
     private static final String CONTAINER_ASSET = /*O*/"assets/dspro_core.bin"/*O*/;
     private static final String GUARD_POLICY_ASSET = /*O*/"assets/dspro_guard.bin"/*O*/;
+    private static final String RESOURCE_VAULT_ASSET = /*O*/"assets/dspro_res.bin"/*O*/;
     private static final String GUARD_PROVIDER_NAME = "com.dspro.guard.DsProGuardProvider";
 
     private static volatile boolean initialized = false;
@@ -96,6 +113,14 @@ final class DsProCoreLoader {
     private static volatile boolean guardProviderInstantiated = false;
     private static volatile boolean guardBindingVerified = false;
     private static volatile boolean coreWatchdogStarted = false;
+
+    private static volatile boolean resourcesMounted = false;
+    private static volatile Object cachedResourcesLoader = null;
+    private static volatile String cachedLegacyAssetPath = null;
+    private static final Map<Resources, Boolean> attachedResourcesMap =
+        Collections.synchronizedMap(new WeakHashMap<Resources, Boolean>());
+    private static final Map<AssetManager, Boolean> attachedAssetsMap =
+        Collections.synchronizedMap(new WeakHashMap<AssetManager, Boolean>());
 
     static boolean isInitialized() {
         return initialized;
@@ -150,6 +175,148 @@ final class DsProCoreLoader {
         activeClassLoader = loader;
         delegateFactory = factory;
         initialized = true;
+    }
+
+    static synchronized void mountEncryptedResources(Context context) {
+        if (context == null || Process.isIsolated()) {
+            return;
+        }
+        if (resourcesMounted) {
+            attachResourcesIfMounted(context);
+            return;
+        }
+
+        String apkPath;
+        String packageName;
+        try {
+            apkPath = context.getPackageCodePath();
+            packageName = context.getPackageName();
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (apkPath == null || apkPath.isEmpty() || packageName == null || packageName.isEmpty()) {
+            return;
+        }
+
+        byte[] blob = null;
+        byte[] salt = null;
+        byte[] key = null;
+        byte[] plainZip = null;
+        try (ZipFile zip = new ZipFile(apkPath)) {
+            ZipEntry entry = zip.getEntry(RESOURCE_VAULT_ASSET);
+            if (entry == null) {
+                return;
+            }
+            try (InputStream in = zip.getInputStream(entry)) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.max(4096L, entry.getSize()));
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    out.write(buf, 0, n);
+                }
+                blob = out.toByteArray();
+            }
+            if (blob.length <= 28) {
+                throw new SecurityException(/*O*/"DS PRO Protection: Encrypted resource vault tampered"/*O*/);
+            }
+
+            salt = new byte[16];
+            byte[] iv = new byte[12];
+            System.arraycopy(blob, 0, salt, 0, 16);
+            System.arraycopy(blob, 16, iv, 0, 12);
+            String saltHex = toLowerHex(salt);
+            key = MessageDigest.getInstance("SHA-256").digest(
+                (packageName + /*O*/":DSPRO_RES_V1:"/*O*/ + saltHex).getBytes(StandardCharsets.UTF_8)
+            );
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
+            plainZip = cipher.doFinal(blob, 28, blob.length - 28);
+
+            File cacheDir = context.getCodeCacheDir();
+            if (cacheDir == null) {
+                cacheDir = context.getCacheDir();
+            }
+            if (cacheDir != null && !cacheDir.exists()) {
+                cacheDir.mkdirs();
+            }
+
+            if (Build.VERSION.SDK_INT >= 30) {
+                File tmp = File.createTempFile(/*O*/".dspro_rv_"/*O*/, ".apk", cacheDir);
+                try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                    fos.write(plainZip);
+                    fos.flush();
+                }
+                ParcelFileDescriptor pfd = ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY);
+                tmp.delete();
+                try {
+                    ResourcesLoader loader = new ResourcesLoader();
+                    loader.addProvider(ResourcesProvider.loadFromApk(pfd));
+                    cachedResourcesLoader = loader;
+                } finally {
+                    try {
+                        pfd.close();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            } else {
+                File vaultFile = new File(cacheDir, /*O*/".dspro_rv_"/*O*/ + Integer.toHexString(apkPath.hashCode()) + ".apk");
+                if (vaultFile.exists()) {
+                    vaultFile.setWritable(true);
+                    vaultFile.delete();
+                }
+                try (FileOutputStream fos = new FileOutputStream(vaultFile)) {
+                    fos.write(plainZip);
+                    fos.flush();
+                }
+                vaultFile.setReadOnly();
+                vaultFile.deleteOnExit();
+                cachedLegacyAssetPath = vaultFile.getAbsolutePath();
+            }
+            resourcesMounted = true;
+            attachResourcesIfMounted(context);
+        } catch (SecurityException se) {
+            throw se;
+        } catch (Throwable t) {
+            throw new SecurityException(/*O*/"DS PRO Protection: Encrypted resource mount failed"/*O*/, t);
+        } finally {
+            wipe(blob);
+            wipe(salt);
+            wipe(key);
+            wipe(plainZip);
+        }
+    }
+
+    static void attachResourcesIfMounted(Context context) {
+        if (!resourcesMounted || context == null) {
+            return;
+        }
+        try {
+            Resources res = context.getResources();
+            if (res == null) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 30 && cachedResourcesLoader instanceof ResourcesLoader) {
+                synchronized (attachedResourcesMap) {
+                    if (!Boolean.TRUE.equals(attachedResourcesMap.get(res))) {
+                        res.addLoaders((ResourcesLoader) cachedResourcesLoader);
+                        attachedResourcesMap.put(res, Boolean.TRUE);
+                    }
+                }
+            } else if (cachedLegacyAssetPath != null) {
+                AssetManager am = res.getAssets();
+                if (am != null) {
+                    synchronized (attachedAssetsMap) {
+                        if (!Boolean.TRUE.equals(attachedAssetsMap.get(am))) {
+                            Method addAssetPath = AssetManager.class.getDeclaredMethod("addAssetPath", String.class);
+                            addAssetPath.setAccessible(true);
+                            addAssetPath.invoke(am, cachedLegacyAssetPath);
+                            attachedAssetsMap.put(am, Boolean.TRUE);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     static synchronized void startCoreWatchdog(final String apkPath, final String dataDir, final String packageName, final boolean strictAntiDump) {
@@ -401,6 +568,9 @@ final class DsProCoreLoader {
                 boolean requireGuard = lines.length >= 5 && "1".equals(lines[4].trim());
                 boolean compressedPayloads = lines.length >= 6 && /*O*/"Z1"/*O*/.equals(lines[5].trim());
                 boolean antiDumpEnabled = lines.length >= 7 && "1".equals(lines[6].trim());
+                boolean encryptStrings = lines.length >= 8 && /*O*/"S1"/*O*/.equals(lines[7].trim());
+                String digestLine = lines.length >= 9 ? lines[8].trim() : "";
+                String[] expectedDigests = digestLine.isEmpty() ? new String[0] : digestLine.split(",");
 
                 if (antiDumpEnabled) {
                     enforcePreDecryptAntiDump(apkPath, dataDir, packageName, true);
@@ -409,14 +579,34 @@ final class DsProCoreLoader {
                     throw new SecurityException(/*O*/"DS PRO Protection: Guard policy missing"/*O*/);
                 }
 
-                CoreMetadata meta = new CoreMetadata(dexCount, originalApp, originalFactory, requireGuard, antiDumpEnabled);
+                CoreMetadata meta = new CoreMetadata(
+                    dexCount,
+                    originalApp,
+                    originalFactory,
+                    requireGuard,
+                    antiDumpEnabled,
+                    encryptStrings,
+                    expectedDigests
+                );
 
                 ByteBuffer[] buffers = new ByteBuffer[dexCount];
                 Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
                 byte[] dexTag = /*O*/":DEX:"/*O*/.getBytes(StandardCharsets.UTF_8);
+                byte[] strTag = /*O*/":STR:"/*O*/.getBytes(StandardCharsets.UTF_8);
                 byte[] iv = new byte[12];
+
                 for (int i = 0; i < dexCount; i++) {
                     dis.readFully(iv);
+                    int patchCipherLen = dis.readInt();
+                    if (patchCipherLen < 0 || patchCipherLen > 32 * 1024 * 1024) {
+                        throw new IllegalStateException("Corrupt string patch header #" + i);
+                    }
+                    byte[] patchCipher = null;
+                    if (patchCipherLen > 0) {
+                        patchCipher = new byte[patchCipherLen];
+                        dis.readFully(patchCipher);
+                    }
+
                     int cipherLen = dis.readInt();
                     if (cipherLen <= 16 || cipherLen > 64 * 1024 * 1024) {
                         throw new IllegalStateException("Corrupt protected payload #" + i);
@@ -432,20 +622,46 @@ final class DsProCoreLoader {
                     sha256.update(coreDexSha256);
                     byte[] entryKey = sha256.digest();
 
+                    byte[] compressedPatch = null;
+                    byte[] patchPlain = null;
+                    if (patchCipher != null) {
+                        byte[] patchIv = iv.clone();
+                        patchIv[0] = (byte) (patchIv[0] ^ 0x5A);
+                        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(entryKey, "AES"), new GCMParameterSpec(128, patchIv));
+                        compressedPatch = cipher.doFinal(patchCipher);
+                        wipe(patchCipher);
+                        patchPlain = inflateBytes(compressedPatch);
+                        wipe(compressedPatch);
+                    }
+
                     cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(entryKey, "AES"), new GCMParameterSpec(128, iv));
                     byte[] decrypted = cipher.doFinal(encrypted);
-                    Arrays.fill(encrypted, (byte) 0);
-                    wipe(entryKey);
+                    wipe(encrypted);
 
                     byte[] plainDex = compressedPayloads ? inflateBytes(decrypted) : decrypted;
                     if (compressedPayloads) {
-                        Arrays.fill(decrypted, (byte) 0);
+                        wipe(decrypted);
                     }
+
+                    if (patchPlain != null) {
+                        sha256.reset();
+                        sha256.update(entryKey);
+                        sha256.update(strTag);
+                        sha256.update(Integer.toString(i).getBytes(StandardCharsets.UTF_8));
+                        byte[] strKey = sha256.digest();
+                        unlockStringTable(plainDex, patchPlain, strKey, sha256);
+                        wipe(strKey);
+                        wipe(patchPlain);
+                    }
+                    wipe(entryKey);
+
+                    String expectedHex = (i < expectedDigests.length) ? expectedDigests[i].trim() : "";
+                    verifyDecryptedDexIntegrity(plainDex, expectedHex, sha256);
 
                     ByteBuffer direct = ByteBuffer.allocateDirect(plainDex.length);
                     direct.put(plainDex);
                     direct.flip();
-                    Arrays.fill(plainDex, (byte) 0);
+                    wipe(plainDex);
                     buffers[i] = direct;
                 }
                 return new DecryptedBundle(buffers, meta);
@@ -465,6 +681,85 @@ final class DsProCoreLoader {
             wipe(aesKey);
             wipe(coreDexSha256);
             wipe(guardDexSha256);
+        }
+    }
+
+    private static void unlockStringTable(
+        byte[] dexBytes,
+        byte[] patchPlain,
+        byte[] strKey,
+        MessageDigest sha256
+    ) throws Exception {
+        try (DataInputStream pdis = new DataInputStream(new ByteArrayInputStream(patchPlain))) {
+            int count = pdis.readInt();
+            for (int i = 0; i < count; i++) {
+                int offset = pdis.readInt();
+                int length = pdis.readUnsignedShort();
+                if (offset < 0 || length <= 0 || offset + length > dexBytes.length) {
+                    throw new SecurityException(/*O*/"DS PRO Protection: Invalid string patch offset"/*O*/);
+                }
+                unlockAsciiSlice(dexBytes, offset, length, strKey, sha256);
+            }
+        }
+    }
+
+    private static void unlockAsciiSlice(
+        byte[] bytes,
+        int offset,
+        int length,
+        byte[] key,
+        MessageDigest sha256
+    ) {
+        sha256.reset();
+        sha256.update(key);
+        sha256.update(new byte[] {
+            (byte) (offset >>> 24),
+            (byte) (offset >>> 16),
+            (byte) (offset >>> 8),
+            (byte) offset,
+            (byte) (length >>> 8),
+            (byte) length
+        });
+        byte[] block = sha256.digest();
+        int bPos = 0;
+        for (int i = 0; i < length; i++) {
+            if (bPos >= block.length) {
+                sha256.reset();
+                sha256.update(block);
+                sha256.update(key);
+                Arrays.fill(block, (byte) 0);
+                block = sha256.digest();
+                bPos = 0;
+            }
+            int mask = (block[bPos++] & 0x7F) | 0x80;
+            bytes[offset + i] = (byte) ((bytes[offset + i] & 0xFF) ^ mask);
+        }
+        Arrays.fill(block, (byte) 0);
+    }
+
+    private static void verifyDecryptedDexIntegrity(
+        byte[] plainDex,
+        String expectedSha256Hex,
+        MessageDigest sha256
+    ) {
+        if (plainDex == null || plainDex.length < 0x70
+            || plainDex[0] != 'd' || plainDex[1] != 'e' || plainDex[2] != 'x' || plainDex[3] != '\n') {
+            throw new SecurityException(/*O*/"DS PRO Protection: Invalid DEX payload header"/*O*/);
+        }
+        ByteBuffer hdr = ByteBuffer.wrap(plainDex, 0, 0x70).order(ByteOrder.LITTLE_ENDIAN);
+        int fileSize = hdr.getInt(32);
+        int headerSize = hdr.getInt(36);
+        int endianTag = hdr.getInt(40);
+        if (fileSize != plainDex.length || headerSize != 0x70 || endianTag != 0x12345678) {
+            throw new SecurityException(/*O*/"DS PRO Protection: Corrupted DEX payload structure"/*O*/);
+        }
+        if (expectedSha256Hex != null && !expectedSha256Hex.isEmpty()) {
+            sha256.reset();
+            sha256.update(plainDex);
+            String actualHex = toLowerHex(sha256.digest());
+            if (!expectedSha256Hex.equalsIgnoreCase(actualHex)) {
+                throw new SecurityException(/*O*/"DS PRO Protection: DEX integrity verification failed"/*O*/);
+            }
         }
     }
 
@@ -607,7 +902,7 @@ final class DsProCoreLoader {
                 || lowerCmd.contains(/*O*/"dumper"/*O*/)) {
                 return true;
             }
-            if (packageName != null && !packageName.isEmpty() && !cmdline.startsWith(packageName)) {
+            if (!Process.isIsolated() && packageName != null && !packageName.isEmpty() && !cmdline.startsWith(packageName)) {
                 if (!mapsContainsPackageApk(packageName)) {
                     return true;
                 }
@@ -730,8 +1025,9 @@ final class DsProCoreLoader {
                 || cls.contains(/*O*/"lsphooker"/*O*/)
                 || cls.contains(/*O*/"edhooker"/*O*/)
                 || cls.contains(/*O*/"sandhook"/*O*/)
-                || cls.contains(/*O*/"pine"/*O*/)
-                || cls.contains(/*O*/"epic"/*O*/)
+                || cls.contains(/*O*/"canyie.pine"/*O*/)
+                || cls.contains(/*O*/"me.weishu.epic"/*O*/)
+                || cls.contains(/*O*/"tiann.epic"/*O*/)
                 || cls.contains(/*O*/"whale"/*O*/)
                 || cls.contains(/*O*/"blackdex"/*O*/)
                 || cls.contains(/*O*/"blackbox"/*O*/)

@@ -15,16 +15,21 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.zip.Adler32
 import java.util.zip.CRC32
 import java.util.zip.Inflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -57,6 +62,7 @@ class ExampleUnitTest {
         System.arraycopy("dex\n035\u0000".toByteArray(Charsets.US_ASCII), 0, bytes, 0, 8)
         buf.putInt(32, totalSize)
         buf.putInt(36, 112)
+        buf.putInt(40, 0x12345678)
 
         val classDefsOff = 112
         buf.putInt(96, 1)
@@ -87,6 +93,126 @@ class ExampleUnitTest {
         return bytes
     }
 
+    private fun buildSyntheticDexWithStrings(
+        typeDescriptor: String = "Lcom/demo/KeepType;",
+        secretLiteral: String = "https://api.secret.dspro.test/v2",
+    ): ByteArray {
+        val totalSize = 512
+        val bytes = ByteArray(totalSize)
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+
+        System.arraycopy("dex\n035\u0000".toByteArray(Charsets.US_ASCII), 0, bytes, 0, 8)
+        buf.putInt(32, totalSize)
+        buf.putInt(36, 112)
+        buf.putInt(40, 0x12345678)
+
+        // string_ids (2 strings) at 112..120
+        val stringIdsOff = 112
+        buf.putInt(56, 2)
+        buf.putInt(60, stringIdsOff)
+
+        // type_ids (1 type referencing string idx 0) at 120..124
+        val typeIdsOff = 120
+        buf.putInt(64, 1)
+        buf.putInt(68, typeIdsOff)
+        buf.putInt(typeIdsOff, 0)
+
+        // Place string_data_items at 220 and 300
+        val str0Off = 220
+        val str1Off = 300
+        buf.putInt(stringIdsOff, str0Off)
+        buf.putInt(stringIdsOff + 4, str1Off)
+
+        fun writeStringItem(off: Int, value: String) {
+            val raw = value.toByteArray(Charsets.US_ASCII)
+            bytes[off] = raw.size.toByte()
+            System.arraycopy(raw, 0, bytes, off + 1, raw.size)
+            bytes[off + 1 + raw.size] = 0
+        }
+
+        writeStringItem(str0Off, typeDescriptor)
+        writeStringItem(str1Off, secretLiteral)
+
+        DexPatcher.recomputeDexChecksums(bytes)
+        return bytes
+    }
+
+    private fun buildSyntheticDexWithControlFlow(): ByteArray {
+        val totalSize = 512
+        val bytes = ByteArray(totalSize)
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+
+        System.arraycopy("dex\n035\u0000".toByteArray(Charsets.US_ASCII), 0, bytes, 0, 8)
+        buf.putInt(32, totalSize)
+        buf.putInt(36, 112)
+        buf.putInt(40, 0x12345678)
+
+        val classDefsOff = 112
+        buf.putInt(96, 1)
+        buf.putInt(100, classDefsOff)
+        buf.putInt(classDefsOff + 16, -1)
+        val classDataOff = 144
+        buf.putInt(classDefsOff + 24, classDataOff)
+
+        val codeOff = 160
+        bytes[144] = 0
+        bytes[145] = 0
+        bytes[146] = 1
+        bytes[147] = 0
+        bytes[148] = 1
+        bytes[149] = 1
+        bytes[150] = (0x80 or (codeOff and 0x7F)).toByte()
+        bytes[151] = (codeOff shr 7).toByte()
+
+        // Instructions (14 units):
+        // pc=0: nop (0x0000) -> becomes goto +1 (0x0128)
+        // pc=1..2: if-eqz v0, +3 (target pc=4) -> target pc=4 is goto +2 -> threads to pc=6!
+        // pc=3: return-void (0x000e)
+        // pc=4: goto +2 (0x0228) -> hops to pc=6
+        // pc=5: return-void (0x000e)
+        // pc=6: return-void (0x000e)
+        // pc=7..12: packed-switch-payload (0x0100, size=1, firstKey=0, target=0) - MUST stay untouched!
+        val insns = shortArrayOf(
+            0x0000.toShort(), // 0: nop
+            0x0038.toShort(), // 1: if-eqz v0
+            0x0003.toShort(), // 2: +3 -> pc=4
+            0x000e.toShort(), // 3: return-void
+            0x0228.toShort(), // 4: goto +2 -> pc=6
+            0x000e.toShort(), // 5: return-void
+            0x000e.toShort(), // 6: return-void
+            0x0100.toShort(), // 7: packed-switch-payload ident
+            0x0001.toShort(), // 8: size = 1
+            0x0000.toShort(), // 9: first_key low (also 0x0000 inside payload)
+            0x0000.toShort(), // 10: first_key high
+            0x0000.toShort(), // 11: target[0] low
+            0x0000.toShort(), // 12: target[0] high
+        )
+        buf.putInt(codeOff + 12, insns.size)
+        for (i in insns.indices) {
+            buf.putShort(codeOff + 16 + i * 2, insns[i])
+        }
+
+        DexPatcher.recomputeDexChecksums(bytes)
+        return bytes
+    }
+
+    private fun inflatePlain(compressed: ByteArray): ByteArray {
+        val inflater = Inflater()
+        return try {
+            inflater.setInput(compressed)
+            val out = ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            while (!inflater.finished()) {
+                val n = inflater.inflate(buf)
+                if (n <= 0) break
+                out.write(buf, 0, n)
+            }
+            out.toByteArray()
+        } finally {
+            inflater.end()
+        }
+    }
+
     private fun decryptCorePayloads(zip: ZipFile, packageName: String): Pair<List<String>, List<ByteArray>> {
         val containerName = ApkProtectionProcessor.coreContainerAssetPath(packageName)
         val entry = zip.getEntry(containerName)
@@ -104,7 +230,7 @@ class ExampleUnitTest {
         }
 
         zip.getInputStream(entry).use { rawIn ->
-            java.io.DataInputStream(rawIn).use { dis ->
+            DataInputStream(rawIn).use { dis ->
                 val salt = ByteArray(16).also { dis.readFully(it) }
                 val maskedPepper = ByteArray(32).also { dis.readFully(it) }
                 val metaIv = ByteArray(12).also { dis.readFully(it) }
@@ -150,38 +276,64 @@ class ExampleUnitTest {
                         Character.digit(aesKeyHex[i * 2 + 1], 16)).toByte()
                 }
                 val isCompressed = lines.size >= 6 && lines[5].trim() == "Z1"
+                val expectedDigests = if (lines.size >= 9 && lines[8].trim().isNotEmpty()) {
+                    lines[8].trim().split(",")
+                } else {
+                    emptyList()
+                }
+
                 val dexList = (0 until dexCount).map { idx ->
                     val iv = ByteArray(12).also { dis.readFully(it) }
+                    val patchLen = dis.readInt()
+                    val patchCipher = if (patchLen > 0) ByteArray(patchLen).also { dis.readFully(it) } else null
                     val cLen = dis.readInt()
                     val enc = ByteArray(cLen).also { dis.readFully(it) }
+
                     val ivHex = iv.joinToString("") { "%02x".format(it) }
                     sha256.reset()
                     sha256.update(aesKey)
                     sha256.update(":DEX:$idx:$ivHex".toByteArray(Charsets.UTF_8))
                     sha256.update(coreDexSha256)
-                    val entryKeySpec = SecretKeySpec(sha256.digest(), "AES")
+                    val entryKey = sha256.digest()
+                    val entryKeySpec = SecretKeySpec(entryKey, "AES")
+
+                    val patchPlain = patchCipher?.let { pc ->
+                        val patchIv = iv.copyOf().apply { this[0] = (this[0].toInt() xor 0x5A).toByte() }
+                        val compressedPatch = Cipher.getInstance("AES/GCM/NoPadding").run {
+                            init(Cipher.DECRYPT_MODE, entryKeySpec, GCMParameterSpec(128, patchIv))
+                            doFinal(pc)
+                        }
+                        inflatePlain(compressedPatch)
+                    }
+
                     val plain = Cipher.getInstance("AES/GCM/NoPadding").run {
                         init(Cipher.DECRYPT_MODE, entryKeySpec, GCMParameterSpec(128, iv))
                         doFinal(enc)
                     }
-                    if (!isCompressed) {
-                        plain
-                    } else {
-                        val inflater = Inflater()
-                        try {
-                            inflater.setInput(plain)
-                            val out = java.io.ByteArrayOutputStream()
-                            val buf = ByteArray(8192)
-                            while (!inflater.finished()) {
-                                val n = inflater.inflate(buf)
-                                if (n <= 0) break
-                                out.write(buf, 0, n)
+                    val restoredDex = if (!isCompressed) plain else inflatePlain(plain)
+
+                    if (patchPlain != null) {
+                        sha256.reset()
+                        sha256.update(entryKey)
+                        sha256.update(":STR:$idx".toByteArray(Charsets.UTF_8))
+                        val strKey = sha256.digest()
+                        DataInputStream(ByteArrayInputStream(patchPlain)).use { pdis ->
+                            val count = pdis.readInt()
+                            for (p in 0 until count) {
+                                val off = pdis.readInt()
+                                val len = pdis.readUnsignedShort()
+                                DexPatcher.applyAsciiStreamXor(restoredDex, off, len, strKey, sha256)
                             }
-                            out.toByteArray()
-                        } finally {
-                            inflater.end()
                         }
                     }
+
+                    if (idx < expectedDigests.size && expectedDigests[idx].isNotBlank()) {
+                        sha256.reset()
+                        val actualHex = sha256.digest(restoredDex).joinToString("") { "%02x".format(it) }
+                        assertEquals(expectedDigests[idx].trim(), actualHex)
+                    }
+
+                    restoredDex
                 }
                 return lines to dexList
             }
@@ -207,11 +359,41 @@ class ExampleUnitTest {
         return plain.trimEnd('\n').split("\n")
     }
 
+    private fun decryptResourceVault(zip: ZipFile, packageName: String): Map<String, ByteArray> {
+        val vaultPath = ApkProtectionProcessor.resourceVaultAssetPath(packageName)
+        val entry = zip.getEntry(vaultPath)
+            ?: throw AssertionError("Missing encrypted Resource Vault $vaultPath")
+        val blob = zip.getInputStream(entry).use { it.readBytes() }
+        assertTrue(blob.size > 28)
+        val salt = blob.copyOfRange(0, 16)
+        val iv = blob.copyOfRange(16, 28)
+        val saltHex = salt.joinToString("") { "%02x".format(it) }
+        val key = MessageDigest.getInstance("SHA-256").digest(
+            "$packageName:DSPRO_RES_V1:$saltHex".toByteArray(Charsets.UTF_8),
+        )
+        val plainZip = Cipher.getInstance("AES/GCM/NoPadding").run {
+            init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+            doFinal(blob, 28, blob.size - 28)
+        }
+        val out = linkedMapOf<String, ByteArray>()
+        ZipInputStream(ByteArrayInputStream(plainZip)).use { zis ->
+            var ze = zis.nextEntry
+            while (ze != null) {
+                out[ze.name] = zis.readBytes()
+                zis.closeEntry()
+                ze = zis.nextEntry
+            }
+        }
+        return out
+    }
+
     @Test
     fun `default config starts with zero active options and start disabled`() {
         val defaultCfg = ProtectionConfig()
         assertEquals(0, defaultCfg.activeToggleCount)
         assertFalse(defaultCfg.requiresRuntimeGuard)
+        assertFalse(defaultCfg.requiresGuardDex)
+        assertFalse(defaultCfg.requiresCoreDexContainer)
         assertFalse(DsProUiState().isStartEnabled)
         assertFalse(
             DsProUiState(
@@ -237,7 +419,14 @@ class ExampleUnitTest {
             DsProUiState(
                 selectedApkUri = "content://downloads/demo.apk",
                 selectedApk = sampleApk(),
-                config = ProtectionConfig(detectRoot = true),
+                config = ProtectionConfig(stringEncryption = true),
+            ).isStartEnabled,
+        )
+        assertTrue(
+            DsProUiState(
+                selectedApkUri = "content://downloads/demo.apk",
+                selectedApk = sampleApk(),
+                config = ProtectionConfig(resourceEncryption = true),
             ).isStartEnabled,
         )
         assertFalse(
@@ -251,19 +440,30 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `section active counts match enabled real toggles`() {
-        val cfg = ProtectionConfig(
+    fun `section active counts match 8 upper section and 6 lower section toggles`() {
+        val allOn = ProtectionConfig(
             detectRoot = true,
+            detectDebugger = true,
             antiScreenshot = true,
             antiTampering = true,
+            signaturePinning = true,
             antiDump = true,
+            dexIntegrityProtection = true,
             dsProDexEncryption = true,
+            stringEncryption = true,
+            controlFlowObfuscation = true,
+            resourceEncryption = true,
             disableDebuggable = true,
+            disableBackup = true,
             stripDexDebug = true,
         )
-        assertEquals(4, cfg.activeCountFor(ProtectionSection.RUNTIME_GUARD))
-        assertEquals(3, cfg.activeCountFor(ProtectionSection.BINARY_HARDENING))
-        assertEquals(7, cfg.activeToggleCount)
+        assertEquals(8, allOn.activeCountFor(ProtectionSection.RUNTIME_GUARD))
+        assertEquals(6, allOn.activeCountFor(ProtectionSection.BINARY_HARDENING))
+        assertEquals(14, allOn.activeToggleCount)
+        assertTrue(allOn.requiresRuntimeGuard)
+        assertTrue(allOn.requiresGuardDex)
+        assertTrue(allOn.requiresCoreDexContainer)
+        assertFalse(ProtectionConfig(disableBackup = true).requiresGuardDex)
     }
 
     @Test
@@ -280,6 +480,7 @@ class ExampleUnitTest {
                 disableBackup = true,
                 injectGuardProvider = true,
                 enableCoreProtection = true,
+                protectionIdentifier = AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE,
                 packageName = "com.demo.app",
             ),
         )
@@ -287,6 +488,7 @@ class ExampleUnitTest {
         assertTrue(patched.backupDisabled)
         assertTrue(patched.guardProviderInjected)
         assertTrue(patched.coreProtectionInjected)
+        assertTrue(patched.protectionIdentifierEmbedded)
 
         val verified = AxmlManifestPatcher.inspectForTest(patched.manifestBytes)
         assertEquals(false, verified.first)
@@ -296,12 +498,14 @@ class ExampleUnitTest {
         val (appName, factoryName) = AxmlManifestPatcher.inspectCoreForTest(patched.manifestBytes)
         assertEquals(AxmlManifestPatcher.CORE_APP_CLASS, appName)
         assertEquals(AxmlManifestPatcher.CORE_FACTORY_CLASS, factoryName)
+
+        val summary = AxmlManifestPatcher.inspectSecuritySummary(patched.manifestBytes)
+        assertEquals(AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE, summary?.protectionIdentifier)
     }
 
     @Test
     fun `dex patcher strips source file and debug info and updates checksums`() {
         val dex = buildSyntheticDex(withDebugInfo = true)
-        // Put a valid debug_info_item at offset 200 (line_start=1, params=0, DBG_END_SEQUENCE=0x00)
         dex[200] = 1
         dex[201] = 0
         dex[202] = 0
@@ -325,17 +529,73 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `dspro core encryption encrypts all dex payloads with AES-256-GCM and replaces classes dex`() {
+    fun `dex string encryption masks literal strings while preserving structural descriptors and decrypts losslessly`() {
+        val rawDex = buildSyntheticDexWithStrings(
+            typeDescriptor = "Lcom/demo/KeepType;",
+            secretLiteral = "https://api.secret.dspro.test/v2",
+        )
+        val strKey = MessageDigest.getInstance("SHA-256").digest("test-str-key".toByteArray())
+
+        val res = DexPatcher.encryptLiteralStrings(rawDex, strKey)
+        assertEquals(1, res.encryptedStringCount)
+        assertTrue(res.compressedPatchBlob.isNotEmpty())
+        assertTrue(DexPatcher.containsAsciiMarker(res.encryptedDexBytes, "Lcom/demo/KeepType;"))
+        assertFalse(DexPatcher.containsAsciiMarker(res.encryptedDexBytes, "api.secret.dspro.test"))
+
+        val inflatedPatch = inflatePlain(res.compressedPatchBlob)
+        val unlocked = res.encryptedDexBytes.copyOf()
+        DataInputStream(ByteArrayInputStream(inflatedPatch)).use { pdis ->
+            val count = pdis.readInt()
+            assertEquals(1, count)
+            val off = pdis.readInt()
+            val len = pdis.readUnsignedShort()
+            DexPatcher.applyAsciiStreamXor(unlocked, off, len, strKey)
+        }
+        assertArrayEquals(rawDex, unlocked)
+    }
+
+    @Test
+    fun `control flow obfuscation transforms nop and threads branches without touching switch payloads`() {
+        val rawDex = buildSyntheticDexWithControlFlow()
+        val (cfoDex, stats) = DexPatcher.obfuscateControlFlow(rawDex)
+
+        assertTrue(DexPatcher.isValidDex(cfoDex))
+        assertEquals(1, stats.methodsScanned)
+        assertTrue(stats.transformedUnits >= 2)
+
+        val buf = ByteBuffer.wrap(cfoDex).order(ByteOrder.LITTLE_ENDIAN)
+        val insnsOff = 160 + 16
+        // pc=0: nop (0x0000) -> goto +1 (0x0128)
+        assertEquals(0x0128, buf.getShort(insnsOff).toInt() and 0xFFFF)
+        // pc=1..2: if-eqz offset +3 (to pc=4 goto +2) -> threaded directly to pc=6 (+5 relative to pc=1)
+        assertEquals(5, buf.getShort(insnsOff + 2 * 2).toInt())
+        // pc=7..12 packed-switch-payload unchanged (0x0100 ident, 0x0000 inside payload untouched)
+        assertEquals(0x0100, buf.getShort(insnsOff + 7 * 2).toInt() and 0xFFFF)
+        assertEquals(0x0000, buf.getShort(insnsOff + 9 * 2).toInt() and 0xFFFF)
+
+        // Verify recomputed Adler32 matches bytes[12..end)
+        val headerAdler = buf.getInt(8).toLong() and 0xFFFFFFFFL
+        val computedAdler = Adler32().apply { update(cfoDex, 12, cfoDex.size - 12) }.value
+        assertEquals(computedAdler, headerAdler)
+    }
+
+    @Test
+    fun `dspro core string resource cfo and dex integrity encrypt and roundtrip cleanly`() {
         val tempDir = Files.createTempDirectory("dspro_core_test").toFile()
         try {
             val inputApk = File(tempDir, "sample.apk")
             val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.demo.app", debuggable = true, allowBackup = true)
-            val appDex1 = buildSyntheticDex(withDebugInfo = true)
-            val appDex2 = buildSyntheticDex(withDebugInfo = true, descriptor = "Lcom/demo/app/Feature;")
+            val appDex1 = buildSyntheticDexWithStrings(
+                typeDescriptor = "Lcom/demo/app/Main;",
+                secretLiteral = "https://endpoint.hidden.example/token",
+            )
+            val appDex2 = buildSyntheticDexWithControlFlow()
             val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
             val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/core/DsProApplication;")
             val arscBytes = ByteArray(64) { 0x42 }
             val soBytes = ByteArray(64) { 0x7F }
+            val jsonAsset = """{"secret":"value","mode":"prod"}""".toByteArray(Charsets.UTF_8)
+            val txtAsset = "confidential-config-line".toByteArray(Charsets.UTF_8)
 
             ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
                 zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
@@ -348,6 +608,14 @@ class ExampleUnitTest {
 
                 zip.putNextEntry(ZipEntry("classes2.dex"))
                 zip.write(appDex2)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/config/app.json"))
+                zip.write(jsonAsset)
+                zip.closeEntry()
+
+                zip.putNextEntry(ZipEntry("assets/secret.txt"))
+                zip.write(txtAsset)
                 zip.closeEntry()
 
                 zip.putNextEntry(ZipEntry("resources.arsc").apply {
@@ -368,10 +636,6 @@ class ExampleUnitTest {
                 zip.write(soBytes)
                 zip.closeEntry()
 
-                zip.putNextEntry(ZipEntry("DebugProbesKt.bin"))
-                zip.write(byteArrayOf(1, 2, 3))
-                zip.closeEntry()
-
                 zip.putNextEntry(ZipEntry("META-INF/CERT.RSA"))
                 zip.write(byteArrayOf(7, 8, 9))
                 zip.closeEntry()
@@ -381,19 +645,19 @@ class ExampleUnitTest {
             val stagingApk = File(tempDir, "staging.apk")
             val fullConfig = ProtectionConfig(
                 detectRoot = true,
-                detectEmulator = true,
-                detectXposed = true,
                 detectDebugger = true,
                 antiScreenshot = true,
                 antiTampering = true,
                 signaturePinning = true,
                 antiDump = true,
+                dexIntegrityProtection = true,
                 dsProDexEncryption = true,
+                stringEncryption = true,
+                controlFlowObfuscation = true,
+                resourceEncryption = true,
                 disableDebuggable = true,
                 disableBackup = true,
                 stripDexDebug = true,
-                stripMetadataBloat = true,
-                bestCompression = true,
             )
 
             val stats = ApkProtectionProcessor.transformApkArchive(
@@ -413,11 +677,13 @@ class ExampleUnitTest {
 
             assertTrue(stats.coreProtectionInjected)
             assertEquals(2, stats.encryptedDexCount)
+            assertEquals(1, stats.encryptedStringsCount)
+            assertEquals(2, stats.encryptedResourceCount)
+            assertTrue(stats.cfoTransformedUnits >= 2)
+            assertEquals(2, stats.dexIntegrityCount)
             assertEquals("classes2.dex", stats.injectedGuardDexName)
-            assertEquals(4, stats.dexDebugItemsCleared)
-            assertEquals(1, stats.strippedBloatCount)
-            // manifest + arsc + lib + dspro core container + core classes.dex + guard classes2.dex = 6
-            assertEquals(6, stats.integrityCount)
+            // manifest + arsc + lib + dspro_res.bin + dspro_core.bin + core classes.dex + guard classes2.dex = 7
+            assertEquals(7, stats.integrityCount)
 
             val (valid, _) = ApkProtectionProcessor.verifyOutputApk(outputApk)
             assertTrue(valid)
@@ -426,18 +692,25 @@ class ExampleUnitTest {
                 assertArrayEquals(coreDex, outZip.getInputStream(outZip.getEntry("classes.dex")).readBytes())
                 assertArrayEquals(guardDex, outZip.getInputStream(outZip.getEntry("classes2.dex")).readBytes())
                 assertTrue(outZip.getEntry("classes3.dex") == null)
-                assertTrue(outZip.getEntry("assets/ds_pro_security_config.json") == null)
-                assertTrue(outZip.getEntry("assets/ds_pro_integrity.sha256") == null)
-                assertTrue(outZip.getEntry("assets/ds_pro_dpt.idx") == null)
+                assertTrue(outZip.getEntry("assets/config/app.json") == null)
+                assertTrue(outZip.getEntry("assets/secret.txt") == null)
+                assertTrue(outZip.getEntry("assets/dspro_res.bin") != null)
                 assertTrue(outZip.entries().asSequence().none { it.name.contains("dpt", ignoreCase = true) })
+
+                val decryptedAssets = decryptResourceVault(outZip, "com.demo.app")
+                assertEquals(2, decryptedAssets.size)
+                assertArrayEquals(jsonAsset, decryptedAssets["assets/config/app.json"])
+                assertArrayEquals(txtAsset, decryptedAssets["assets/secret.txt"])
 
                 val (metaLines, decryptedList) = decryptCorePayloads(outZip, "com.demo.app")
                 assertEquals("1", metaLines[4].trim()) // guard anti-removal binding enabled
                 assertEquals("Z1", metaLines[5].trim()) // pre-encryption DEX compression enabled
                 assertEquals("1", metaLines[6].trim()) // strict pre-decrypt anti-dump enabled
+                assertEquals("S1", metaLines[7].trim()) // string encryption enabled
+                assertEquals(2, metaLines[8].trim().split(",").size) // 2 inner DEX SHA-256 digests
                 assertEquals(2, decryptedList.size)
-                assertArrayEquals(DexPatcher.stripDebugInfo(appDex1).first, decryptedList[0])
-                assertArrayEquals(DexPatcher.stripDebugInfo(appDex2).first, decryptedList[1])
+                assertArrayEquals(appDex1, decryptedList[0])
+                assertArrayEquals(DexPatcher.obfuscateControlFlow(appDex2).first, decryptedList[1])
 
                 val guardBlob = outZip.getInputStream(
                     outZip.getEntry(ApkProtectionProcessor.guardConfigAssetPath("com.demo.app")),
@@ -447,11 +720,14 @@ class ExampleUnitTest {
                 assertFalse(rawText.contains("AndroidManifest.xml"))
 
                 val guardLines = decryptGuardPolicy(outZip, "com.demo.app")
-                assertEquals("507", guardLines[0]) // all 8 runtime flags enabled (including antiDump)
+                // 1 + 16 + 32 + 64 + 128 + 256 + 512 = 1009
+                assertEquals("1009", guardLines[0])
                 assertEquals("AB:CD:EF", guardLines[1])
-                assertEquals("6", guardLines[2])
-
-                assertTrue(outZip.getEntry("assets/libjiagu.so") == null)
+                assertEquals("7", guardLines[2])
+                val dexCountLine = guardLines[3 + 7]
+                assertEquals("2", dexCountLine)
+                val dexRow0 = guardLines[3 + 7 + 1]
+                assertTrue(dexRow0.endsWith("|classes.dex"))
 
                 val patchedManifest = outZip.getInputStream(outZip.getEntry("AndroidManifest.xml")).readBytes()
                 val (appName, factoryName) = AxmlManifestPatcher.inspectCoreForTest(patchedManifest)
@@ -491,8 +767,8 @@ class ExampleUnitTest {
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProApplication;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProHostClassLoader;"))
         assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/stub/StubApp;"))
-        assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "com/dspro/dpt"))
-        assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "com/dspro/dpt"))
+        assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "isEmulator"))
+        assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "XposedBridge"))
         // Verify compile-time XOR obfuscation hid sensitive runtime strings from plaintext DEX inspection
         assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "blackdex"))
         assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "/proc/self/maps"))
@@ -522,19 +798,19 @@ class ExampleUnitTest {
             )
             val config = ProtectionConfig(
                 detectRoot = true,
-                detectEmulator = true,
-                detectXposed = true,
                 detectDebugger = true,
                 antiScreenshot = true,
                 antiTampering = true,
                 signaturePinning = true,
                 antiDump = true,
+                dexIntegrityProtection = true,
                 dsProDexEncryption = true,
+                stringEncryption = true,
+                controlFlowObfuscation = true,
+                resourceEncryption = true,
                 disableDebuggable = true,
                 disableBackup = true,
                 stripDexDebug = true,
-                stripMetadataBloat = true,
-                bestCompression = true,
             )
 
             val stats = ApkProtectionProcessor.transformApkArchive(
@@ -551,8 +827,12 @@ class ExampleUnitTest {
             assertTrue(stats.guardProviderInjected)
             assertTrue(stats.coreProtectionInjected)
             assertTrue(stats.encryptedDexCount >= 1)
+            assertTrue(stats.encryptedStringsCount > 100)
+            assertTrue(stats.cfoTransformedUnits > 100)
             assertTrue(stats.dexDebugItemsCleared > 0)
             assertTrue(stats.integrityCount > 0)
+            assertEquals(2, stats.dexIntegrityCount)
+            assertTrue(stats.protectionIdentifierEmbedded)
 
             val (valid, msg) = ApkProtectionProcessor.verifyOutputApk(outApk)
             assertTrue(msg, valid)
@@ -571,15 +851,68 @@ class ExampleUnitTest {
                 val (metaLines, decryptedDexes) = decryptCorePayloads(zip, "com.dspro.protection")
                 assertEquals("androidx.core.app.CoreComponentFactory", metaLines[2].trim())
                 assertEquals("1", metaLines[4].trim())
+                assertEquals("S1", metaLines[7].trim())
                 assertEquals(stats.encryptedDexCount, decryptedDexes.size)
                 decryptedDexes.forEach { assertTrue(DexPatcher.isValidDex(it)) }
 
                 val summary = AxmlManifestPatcher.inspectSecuritySummary(manifestBytes)
                 assertTrue(summary != null && summary.hasGuardProvider && summary.hasCoreProtection && !summary.isDebuggable && !summary.allowsBackup)
+                assertEquals("DS 专业版", summary?.protectionIdentifier)
 
                 assertArrayEquals(coreBytes, zip.getInputStream(zip.getEntry("classes.dex")).readBytes())
                 assertArrayEquals(guardBytes, zip.getInputStream(zip.getEntry("classes2.dex")).readBytes())
+
+                // Critical regression check: self-protected DS PRO must preserve its own bundled assets/ds_pro_*.dex
+                val preservedCoreEntry = zip.getEntry("assets/ds_pro_core.dex")
+                val preservedGuardEntry = zip.getEntry("assets/ds_pro_guard.dex")
+                assertTrue("Protected DS PRO lost assets/ds_pro_core.dex", preservedCoreEntry != null)
+                assertTrue("Protected DS PRO lost assets/ds_pro_guard.dex", preservedGuardEntry != null)
+                val extractedCore = zip.getInputStream(preservedCoreEntry).readBytes()
+                val extractedGuard = zip.getInputStream(preservedGuardEntry).readBytes()
+                assertArrayEquals(coreBytes, extractedCore)
+                assertArrayEquals(guardBytes, extractedGuard)
+
+                // Verify the self-protected DS PRO can protect another APK cleanly using those preserved assets
+                val secondInput = File(tempDir, "second_target.apk")
+                ZipOutputStream(FileOutputStream(secondInput)).use { targetZip ->
+                    targetZip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                    targetZip.write(AxmlManifestPatcher.buildMinimalManifestForTest("com.second.app", debuggable = true, allowBackup = true))
+                    targetZip.closeEntry()
+                    targetZip.putNextEntry(ZipEntry("classes.dex"))
+                    targetZip.write(buildSyntheticDexWithStrings("Lcom/second/app/Main;", "https://second.target.example/v1"))
+                    targetZip.closeEntry()
+                }
+                val secondOut = File(tempDir, "second_protected.apk")
+                val secondStats = ApkProtectionProcessor.transformApkArchive(
+                    inputFile = secondInput,
+                    outputFile = secondOut,
+                    analysis = sampleApk(secondInput.absolutePath).copy(packageName = "com.second.app"),
+                    config = config,
+                    guardDexBytes = extractedGuard,
+                    coreDexBytes = extractedCore,
+                )
+                assertTrue(secondStats.coreProtectionInjected)
+                assertTrue(secondStats.guardProviderInjected)
+                assertTrue(secondStats.protectionIdentifierEmbedded)
+                assertTrue(ApkProtectionProcessor.verifyOutputApk(secondOut).first)
+                ZipFile(secondOut).use { secondZip ->
+                    val secondManifest = secondZip.getInputStream(secondZip.getEntry("AndroidManifest.xml")).readBytes()
+                    assertEquals("DS 专业版", AxmlManifestPatcher.inspectSecuritySummary(secondManifest)?.protectionIdentifier)
+                }
             }
+
+            // Re-protecting an already Core-protected APK must reject cleanly without corrupting
+            val doubleOut = File(tempDir, "double_protected.apk")
+            val reprotectErr = runCatching {
+                ApkProtectionProcessor.transformApkArchive(
+                    inputFile = outApk,
+                    outputFile = doubleOut,
+                    analysis = analysis.copy(cachedApkPath = outApk.absolutePath),
+                    config = ProtectionConfig(disableDebuggable = true),
+                )
+            }.exceptionOrNull()
+            assertTrue(reprotectErr is IllegalArgumentException)
+            assertTrue(reprotectErr?.message?.contains("already protected", ignoreCase = true) == true)
         } finally {
             tempDir.deleteRecursively()
         }
@@ -601,7 +934,6 @@ class ExampleUnitTest {
             val kotlinModuleBytes = byteArrayOf(50, 60, 70)
 
             ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
-                // Put some odd-length deflated entries before resources/libs to guarantee unaligned start offsets
                 zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
                 zip.write(rawManifest)
                 zip.closeEntry()
@@ -648,27 +980,21 @@ class ExampleUnitTest {
                 zip.putNextEntry(ZipEntry("META-INF/app.kotlin_module"))
                 zip.write(kotlinModuleBytes)
                 zip.closeEntry()
-
-                zip.putNextEntry(ZipEntry("DebugProbesKt.bin"))
-                zip.write(byteArrayOf(1, 2, 3))
-                zip.closeEntry()
             }
 
             val outApk = File(tempDir, "aligned_output.apk")
-            // Deliberately pass unknown.package to verify real package is resolved from binary manifest
             val analysisWithFallbackPkg = sampleApk(inputApk.absolutePath).copy(packageName = "unknown.package")
             val config = ProtectionConfig(
                 detectRoot = true,
                 antiTampering = true,
                 dsProDexEncryption = true,
+                resourceEncryption = true,
                 disableDebuggable = true,
                 disableBackup = true,
                 stripDexDebug = true,
-                stripMetadataBloat = true,
-                bestCompression = true,
             )
 
-            val stats = ApkProtectionProcessor.transformApkArchive(
+            ApkProtectionProcessor.transformApkArchive(
                 inputFile = inputApk,
                 outputFile = outApk,
                 analysis = analysisWithFallbackPkg,
@@ -677,7 +1003,6 @@ class ExampleUnitTest {
                 coreDexBytes = coreDex,
             )
 
-            assertEquals(1, stats.strippedBloatCount)
             val (valid, msg) = ApkProtectionProcessor.verifyOutputApk(outApk)
             assertTrue(msg, valid)
 
@@ -692,25 +1017,22 @@ class ExampleUnitTest {
                 assertEquals(ZipEntry.STORED, zip.getEntry("lib/arm64-v8a/libnative.so").method)
                 assertArrayEquals(kotlinBuiltinBytes, zip.getInputStream(zip.getEntry("kotlin/kotlin.kotlin_builtins")).readBytes())
                 assertArrayEquals(kotlinModuleBytes, zip.getInputStream(zip.getEntry("META-INF/app.kotlin_module")).readBytes())
-                assertTrue(zip.getEntry("DebugProbesKt.bin") == null)
 
-                // Decryption must succeed with com.real.target (not unknown.package)
                 val (_, decrypted) = decryptCorePayloads(zip, "com.real.target")
                 assertEquals(1, decrypted.size)
                 assertTrue(DexPatcher.isValidDex(decrypted[0]))
 
-                // Clean branded encrypted dspro_*.bin assets without StubApp / libjiagu.so / dpt
+                // odd_name_1.txt was moved into encrypted dspro_res.bin; STORED model.tflite stays in APK
                 val assetNames = zip.entries().asSequence().map { it.name }.filter { it.startsWith("assets/") }.toList()
                 assertEquals(
                     listOf(
-                        "assets/odd_name_1.txt",
                         "assets/model.tflite",
                         "assets/dspro_core.bin",
                         "assets/dspro_guard.bin",
+                        "assets/dspro_res.bin",
                     ).sorted(),
                     assetNames.sorted(),
                 )
-                assertTrue(zip.getEntry("assets/dspro_core.bin").size < appDex.size)
             }
         } finally {
             tempDir.deleteRecursively()
@@ -718,12 +1040,12 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `binary hardening only adds zero files to assets folder`() {
+    fun `binary hardening without core or resource encryption adds zero files to assets folder`() {
         val tempDir = Files.createTempDirectory("dspro_zero_assets_test").toFile()
         try {
             val inputApk = File(tempDir, "plain.apk")
             val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.clean.app", debuggable = true, allowBackup = true)
-            val appDex = buildSyntheticDex(withDebugInfo = true)
+            val appDex = buildSyntheticDexWithControlFlow()
 
             ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
                 zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
@@ -735,31 +1057,70 @@ class ExampleUnitTest {
             }
 
             val outApk = File(tempDir, "hardened_only.apk")
-            ApkProtectionProcessor.transformApkArchive(
+            val stats = ApkProtectionProcessor.transformApkArchive(
                 inputFile = inputApk,
                 outputFile = outApk,
                 analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.clean.app"),
                 config = ProtectionConfig(
+                    controlFlowObfuscation = true,
                     disableDebuggable = true,
                     disableBackup = true,
                     stripDexDebug = true,
-                    bestCompression = true,
                 ),
             )
 
+            assertTrue(stats.protectionIdentifierEmbedded)
             ZipFile(outApk).use { zip ->
                 val assetEntries = zip.entries().asSequence().filter { it.name.startsWith("assets/") }.toList()
                 assertTrue(assetEntries.isEmpty())
+                val manifestBytes = zip.getInputStream(zip.getEntry("AndroidManifest.xml")).readBytes()
+                val summary = AxmlManifestPatcher.inspectSecuritySummary(manifestBytes)
+                assertEquals("DS 专业版", summary?.protectionIdentifier)
             }
         } finally {
             tempDir.deleteRecursively()
         }
     }
 
+    @Test
+    fun `protection identifier updates cleanly on repatch without breaking manifest or duplicating metadata`() {
+        val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest(
+            packageName = "com.demo.identifier",
+            debuggable = true,
+            allowBackup = true,
+        )
+        val firstPatch = AxmlManifestPatcher.patch(
+            rawManifest,
+            AxmlPatchOptions(
+                protectionIdentifier = "DS Legacy",
+                packageName = "com.demo.identifier",
+            ),
+        )
+        assertTrue(firstPatch.protectionIdentifierEmbedded)
+        assertEquals(
+            "DS Legacy",
+            AxmlManifestPatcher.inspectSecuritySummary(firstPatch.manifestBytes)?.protectionIdentifier,
+        )
+
+        val secondPatch = AxmlManifestPatcher.patch(
+            firstPatch.manifestBytes,
+            AxmlPatchOptions(
+                disableDebuggable = true,
+                protectionIdentifier = AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE,
+                packageName = "com.demo.identifier",
+            ),
+        )
+        assertTrue(secondPatch.protectionIdentifierEmbedded)
+        assertTrue(secondPatch.debuggableDisabled)
+        val summary = AxmlManifestPatcher.inspectSecuritySummary(secondPatch.manifestBytes)
+        assertEquals("com.demo.identifier", summary?.packageName)
+        assertEquals(false, summary?.isDebuggable)
+        assertEquals("DS 专业版", summary?.protectionIdentifier)
+    }
+
     private fun readLocalEntryDataOffsets(apkFile: File): Map<String, Long> {
         val bytes = apkFile.readBytes()
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        // Find End of Central Directory (0x06054b50)
         var eocdOff = -1
         for (i in (bytes.size - 22) downTo 0) {
             if (buf.getInt(i) == 0x06054b50) {
@@ -831,4 +1192,124 @@ class ExampleUnitTest {
         assertTrue(completedRefresh.isStartEnabled)
         assertEquals("Reloaded demo.apk", completedRefresh.statusMessage)
     }
+
+    @Test
+    fun `runtime guard toggles emit exact policy bitmasks and guard-plus-resource survives subsequent hardening`() {
+        val tempDir = Files.createTempDirectory("dspro_guard_bitmask_test").toFile()
+        try {
+            val inputApk = File(tempDir, "input.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.guard.bitmask", debuggable = true, allowBackup = true)
+            val appDex = buildSyntheticDex(withDebugInfo = false)
+            val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
+            val txtAsset = "guard-secret-asset".toByteArray(Charsets.UTF_8)
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("assets/secret.txt"))
+                zip.write(txtAsset)
+                zip.closeEntry()
+            }
+
+            val bitmaskCases = listOf(
+                ProtectionConfig(detectRoot = true) to "1",
+                ProtectionConfig(detectDebugger = true) to "16",
+                ProtectionConfig(antiScreenshot = true) to "32",
+                ProtectionConfig(antiTampering = true) to "64",
+                ProtectionConfig(signaturePinning = true) to "128",
+                ProtectionConfig(antiDump = true) to "256",
+                ProtectionConfig(dexIntegrityProtection = true) to "512",
+            )
+
+            bitmaskCases.forEachIndexed { idx, (cfg, expectedMask) ->
+                val out = File(tempDir, "mask_$idx.apk")
+                ApkProtectionProcessor.transformApkArchive(
+                    inputFile = inputApk,
+                    outputFile = out,
+                    analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.guard.bitmask"),
+                    config = cfg,
+                    guardDexBytes = guardDex,
+                )
+                ZipFile(out).use { zip ->
+                    val guardLines = decryptGuardPolicy(zip, "com.guard.bitmask")
+                    assertEquals("Mismatch for case #$idx", expectedMask, guardLines[0])
+                }
+            }
+
+            val guardPlusResApk = File(tempDir, "guard_res.apk")
+            ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = guardPlusResApk,
+                analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.guard.bitmask"),
+                config = ProtectionConfig(detectRoot = true, resourceEncryption = true),
+                guardDexBytes = guardDex,
+            )
+
+            val hardenedFollowupApk = File(tempDir, "guard_res_hardened.apk")
+            val followupStats = ApkProtectionProcessor.transformApkArchive(
+                inputFile = guardPlusResApk,
+                outputFile = hardenedFollowupApk,
+                analysis = sampleApk(guardPlusResApk.absolutePath).copy(packageName = "com.guard.bitmask"),
+                config = ProtectionConfig(disableDebuggable = true),
+            )
+
+            assertTrue(followupStats.debuggableDisabled)
+            assertTrue(ApkProtectionProcessor.verifyOutputApk(hardenedFollowupApk).first)
+            ZipFile(hardenedFollowupApk).use { zip ->
+                assertTrue(zip.getEntry("classes2.dex") != null)
+                assertTrue(zip.getEntry(ApkProtectionProcessor.guardConfigAssetPath("com.guard.bitmask")) != null)
+                assertTrue(zip.getEntry(ApkProtectionProcessor.resourceVaultAssetPath("com.guard.bitmask")) != null)
+                val guardLines = decryptGuardPolicy(zip, "com.guard.bitmask")
+                assertEquals("1", guardLines[0])
+                val decryptedAssets = decryptResourceVault(zip, "com.guard.bitmask")
+                assertArrayEquals(txtAsset, decryptedAssets["assets/secret.txt"])
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `every individual protection toggle increments its exact section count and dependency flags`() {
+        val upperCases = listOf(
+            ProtectionConfig(detectRoot = true) to true,
+            ProtectionConfig(detectDebugger = true) to true,
+            ProtectionConfig(antiScreenshot = true) to true,
+            ProtectionConfig(antiTampering = true) to true,
+            ProtectionConfig(signaturePinning = true) to true,
+            ProtectionConfig(antiDump = true) to true,
+            ProtectionConfig(dexIntegrityProtection = true) to true,
+            ProtectionConfig(disableBackup = true) to false,
+        )
+        upperCases.forEach { (cfg, needsGuard) ->
+            assertEquals(1, cfg.activeToggleCount)
+            assertEquals(1, cfg.activeCountFor(ProtectionSection.RUNTIME_GUARD))
+            assertEquals(0, cfg.activeCountFor(ProtectionSection.BINARY_HARDENING))
+            assertEquals(needsGuard, cfg.requiresRuntimeGuard)
+            assertEquals(needsGuard, cfg.requiresGuardDex)
+            assertFalse(cfg.requiresCoreDexContainer)
+        }
+
+        val lowerCases = listOf(
+            Triple(ProtectionConfig(dsProDexEncryption = true), false, true),
+            Triple(ProtectionConfig(stringEncryption = true), false, true),
+            Triple(ProtectionConfig(controlFlowObfuscation = true), false, false),
+            Triple(ProtectionConfig(resourceEncryption = true), true, false),
+            Triple(ProtectionConfig(disableDebuggable = true), false, false),
+            Triple(ProtectionConfig(stripDexDebug = true), false, false),
+        )
+        lowerCases.forEach { (cfg, needsGuardDex, needsCoreDex) ->
+            assertEquals(1, cfg.activeToggleCount)
+            assertEquals(0, cfg.activeCountFor(ProtectionSection.RUNTIME_GUARD))
+            assertEquals(1, cfg.activeCountFor(ProtectionSection.BINARY_HARDENING))
+            assertFalse(cfg.requiresRuntimeGuard)
+            assertEquals(needsGuardDex, cfg.requiresGuardDex)
+            assertEquals(needsCoreDex, cfg.requiresCoreDexContainer)
+        }
+    }
 }
+

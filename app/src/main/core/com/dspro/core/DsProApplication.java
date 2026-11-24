@@ -66,6 +66,7 @@ public class DsProApplication extends Application {
 
         DsProCoreLoader.CoreMetadata meta = DsProCoreLoader.getCachedMetadata();
         DsProCoreLoader.verifyGuardBindingIfRequired(base, meta);
+        DsProCoreLoader.mountEncryptedResources(base);
 
         if (meta != null && !meta.originalAppClass.isEmpty()
             && !DsProApplication.class.getName().equals(meta.originalAppClass)) {
@@ -98,7 +99,9 @@ public class DsProApplication extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        DsProCoreLoader.attachResourcesIfMounted(this);
         if (realApplication != null) {
+            DsProCoreLoader.attachResourcesIfMounted(realApplication);
             bindRealApplicationToSystem(realApplication);
             realApplication.onCreate();
         }

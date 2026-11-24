@@ -15,69 +15,74 @@ data class ProtectionFeatureInfo(
 data class ProtectionConfig(
     // Runtime Guard (all OFF by default — enforced via injected DsProGuardProvider DEX)
     val detectRoot: Boolean = false,
-    val detectEmulator: Boolean = false,
-    val detectXposed: Boolean = false,
     val detectDebugger: Boolean = false,
     val antiScreenshot: Boolean = false,
     val antiTampering: Boolean = false,
     val signaturePinning: Boolean = false,
     val antiDump: Boolean = false,
+    val dexIntegrityProtection: Boolean = false,
 
-    // DS PRO Core & Binary Hardening (DEX encryption + direct AXML/DEX/ZIP modifications)
+    // DS PRO Core & Binary Hardening (DEX/String/Resource encryption, CFO, AXML/DEX hardening)
     val dsProDexEncryption: Boolean = false,
+    val stringEncryption: Boolean = false,
+    val controlFlowObfuscation: Boolean = false,
+    val resourceEncryption: Boolean = false,
     val disableDebuggable: Boolean = false,
     val disableBackup: Boolean = false,
     val stripDexDebug: Boolean = false,
-    val stripMetadataBloat: Boolean = false,
-    val bestCompression: Boolean = false,
 ) {
     val requiresRuntimeGuard: Boolean
         get() = detectRoot ||
-            detectEmulator ||
-            detectXposed ||
             detectDebugger ||
             antiScreenshot ||
             antiTampering ||
             signaturePinning ||
-            antiDump
+            antiDump ||
+            dexIntegrityProtection
+
+    val requiresGuardDex: Boolean
+        get() = requiresRuntimeGuard || resourceEncryption
+
+    val requiresCoreDexContainer: Boolean
+        get() = dsProDexEncryption || stringEncryption
 
     val activeToggleCount: Int
         get() = listOf(
             detectRoot,
-            detectEmulator,
-            detectXposed,
             detectDebugger,
             antiScreenshot,
             antiTampering,
             signaturePinning,
             antiDump,
+            dexIntegrityProtection,
             dsProDexEncryption,
+            stringEncryption,
+            controlFlowObfuscation,
+            resourceEncryption,
             disableDebuggable,
             disableBackup,
             stripDexDebug,
-            stripMetadataBloat,
-            bestCompression,
         ).count { it }
 
     fun activeCountFor(section: ProtectionSection): Int = when (section) {
         ProtectionSection.RUNTIME_GUARD -> listOf(
             detectRoot,
-            detectEmulator,
-            detectXposed,
             detectDebugger,
             antiScreenshot,
             antiTampering,
             signaturePinning,
             antiDump,
+            dexIntegrityProtection,
+            disableBackup,
         ).count { it }
 
         ProtectionSection.BINARY_HARDENING -> listOf(
             dsProDexEncryption,
+            stringEncryption,
+            controlFlowObfuscation,
+            resourceEncryption,
             disableDebuggable,
-            disableBackup,
             stripDexDebug,
-            stripMetadataBloat,
-            bestCompression,
         ).count { it }
     }
 }
@@ -101,6 +106,7 @@ data class ApkAnalysisResult(
     val allowsBackup: Boolean = true,
     val hasGuardProvider: Boolean = false,
     val hasCoreProtection: Boolean = false,
+    val protectionIdentifier: String? = null,
 )
 
 enum class StepStatus {

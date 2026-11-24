@@ -293,18 +293,27 @@ fun MainScreen(
                                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             verticalArrangement = Arrangement.spacedBy(6.dp),
                                         ) {
-                                            val isProtected = apk.hasCoreProtection || apk.hasGuardProvider
+                                            val hasIdentifier = !apk.protectionIdentifier.isNullOrBlank()
+                                            val isProtected = apk.hasCoreProtection || apk.hasGuardProvider || hasIdentifier
                                             StatusPill(
                                                 text = when {
                                                     apk.hasCoreProtection && apk.hasGuardProvider -> "DS PRO Protected"
                                                     apk.hasCoreProtection -> "DS PRO Core"
                                                     apk.hasGuardProvider -> "DS PRO Guard"
+                                                    hasIdentifier -> "DS PRO Protected"
                                                     else -> "Unprotected"
                                                 },
                                                 containerColor = if (isProtected) SuccessTint else WarningTint,
                                                 contentColor = if (isProtected) SuccessEmerald else WarningAmber,
                                                 icon = if (isProtected) Icons.Filled.VerifiedUser else Icons.Outlined.Shield,
                                             )
+                                            if (hasIdentifier) {
+                                                StatusPill(
+                                                    text = apk.protectionIdentifier!!,
+                                                    containerColor = SuccessTint,
+                                                    contentColor = SuccessEmerald,
+                                                )
+                                            }
                                             StatusPill(
                                                 text = if (apk.isSigned) "Signed" else "Unsigned",
                                                 containerColor = if (apk.isSigned) ProBlueTint else ErrorTint,
@@ -451,20 +460,6 @@ private val INFO_DETECT_ROOT = ProtectionFeatureInfo(
     howItWorks = "Scans for su binaries, Magisk/KernelSU/APatch mounts, and test-keys ROM builds before the app starts. If root is detected, the app immediately crashes with 'Root detected'.",
 )
 
-private val INFO_DETECT_EMULATOR = ProtectionFeatureInfo(
-    id = "detect_emulator",
-    title = "Detect Emulator",
-    whatTurnsOn = "Activates Emulator & Virtual Device Guard inside encrypted assets/dspro_guard.bin.",
-    howItWorks = "Inspects system build properties (fingerprint, model, goldfish/ranchu/vbox/nox hardware) and QEMU sockets. Stops execution with 'Emulator detected' on virtual devices.",
-)
-
-private val INFO_DETECT_XPOSED = ProtectionFeatureInfo(
-    id = "detect_xposed",
-    title = "Detect Xposed / Frida",
-    whatTurnsOn = "Activates Anti-Hooking Guard against Xposed, LSPosed, EdXposed, Substrate, and Frida.",
-    howItWorks = "Inspects loaded classes, call stacks, active threads (gum-js-loop, linjector), and /proc/self/maps continuously. Crashes immediately if hooking is detected.",
-)
-
 private val INFO_DETECT_DEBUGGER = ProtectionFeatureInfo(
     id = "detect_debugger",
     title = "Detect Debugger",
@@ -500,11 +495,39 @@ private val INFO_ANTI_DUMP = ProtectionFeatureInfo(
     howItWorks = "Blocks BlackDex/BlackBox/VirtualApp sandboxes (/proc/self/cmdline & maps), Frida/hluda/florida, ART hooks on Cipher/ClassLoader/InMemoryDexClassLoader, and open .dex dump file descriptors in real time.",
 )
 
+private val INFO_DEX_INTEGRITY = ProtectionFeatureInfo(
+    id = "dex_integrity",
+    title = "DEX Integrity Protection",
+    whatTurnsOn = "Embeds per-DEX SHA-256 digests, Adler32 checksums, SHA-1 signatures, and decrypted payload hashes into encrypted dspro_guard.bin and dspro_core.bin.",
+    howItWorks = "Validates every classes*.dex entry in the APK plus every in-memory decrypted DEX buffer at launch and continuously in the watchdog. Blocks injected or patched DEX files.",
+)
+
 private val INFO_DSPRO_ENCRYPT = ProtectionFeatureInfo(
     id = "dspro_dex_encryption",
     title = "DS PRO Encrypt",
     whatTurnsOn = "Compresses and encrypts all classes*.dex payloads into V5 AES-256-GCM per-DEX ephemeral keys bound to classes.dex & guard hashes, using a decoupled ClassLoader shell and XOR-obfuscated loader strings.",
-    howItWorks = "Replaces classes.dex with a tamper-locked loader, hides InMemoryDexClassLoader out of dexElements, wipes DirectByteBuffers immediately, and always runs core anti-dump/anti-virtualizer guards before & after decryption.",
+    howItWorks = "Replaces classes.dex with a tamper-locked loader, mounts InMemoryDexClassLoader outside dexElements, wipes DirectByteBuffers immediately, and always runs core anti-dump/anti-virtualizer guards before & after decryption.",
+)
+
+private val INFO_STRING_ENCRYPTION = ProtectionFeatureInfo(
+    id = "string_encryption",
+    title = "String Encryption",
+    whatTurnsOn = "Encrypts non-structural printable ASCII literal strings inside DEX string_data_item pools with per-DEX high-bit stream keys and stores the encrypted patch table inside dspro_core.bin.",
+    howItWorks = "Eliminates plaintext URLs, endpoints, and message literals from static DEX analysis and memory snapshots prior to runtime unlock inside a wiped DirectByteBuffer.",
+)
+
+private val INFO_CONTROL_FLOW = ProtectionFeatureInfo(
+    id = "control_flow_obfuscation",
+    title = "Control Flow Obfuscation",
+    whatTurnsOn = "Transforms Dalvik bytecode in classes*.dex by converting reachable nop slots into relative jumps and threading conditional/unconditional branches through trampoline chains.",
+    howItWorks = "Scrambles control-flow graphs seen by decompilers (JADX/Apktool) while keeping instruction boundaries, switch payloads, and ART verification 100% intact.",
+)
+
+private val INFO_RESOURCE_ENCRYPTION = ProtectionFeatureInfo(
+    id = "resource_encryption",
+    title = "Resource Encryption",
+    whatTurnsOn = "Encrypts compressible app assets (JSON, text, configs, web/data files) with AES-256-GCM into assets/dspro_res.bin while keeping native .so, .tflite, and STORED media safely untouched.",
+    howItWorks = "Decrypts and dynamically mounts encrypted assets at startup using Android ResourcesLoader / AssetManager without leaving readable copies on external storage.",
 )
 
 private val INFO_DISABLE_DEBUGGABLE = ProtectionFeatureInfo(
@@ -524,40 +547,26 @@ private val INFO_DISABLE_BACKUP = ProtectionFeatureInfo(
 private val INFO_STRIP_DEX_DEBUG = ProtectionFeatureInfo(
     id = "strip_dex_debug",
     title = "Strip DEX Debug",
-    whatTurnsOn = "Zeros source_file_idx and method debug_info_off across all DEX bytecode and recalculates DEX SHA-1/Adler32 checksums.",
+    whatTurnsOn = "Zeros source_file_idx, clears debug_info_off, and physically wipes debug_info_item payloads across all DEX bytecode with recalculated SHA-1/Adler32 checksums.",
     howItWorks = "Strips original source file names, line numbers, and local variable debug symbols so reverse-engineering tools cannot inspect debug names.",
-)
-
-private val INFO_STRIP_BLOAT = ProtectionFeatureInfo(
-    id = "strip_bloat",
-    title = "Strip Bloat Metadata",
-    whatTurnsOn = "Removes non-runtime build metadata (DebugProbesKt.bin, kotlin-tooling-metadata.json, META-INF/proguard/*, META-INF/*.version).",
-    howItWorks = "Cleans unnecessary tooling metadata and reduces APK size while preserving .kotlin_module and .kotlin_builtins needed at runtime.",
-)
-
-private val INFO_BEST_COMPRESSION = ProtectionFeatureInfo(
-    id = "best_compression",
-    title = "Best Compression",
-    whatTurnsOn = "Enables Deflater level 9 compression for deflated ZIP entries while keeping 16KB/4B aligned STORED .so, resources.arsc, and raw assets.",
-    howItWorks = "Shrinks final APK size cleanly while preserving Android 11–16 resource and native library alignment rules.",
 )
 
 private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = listOf(
     ToggleSpec(INFO_DETECT_ROOT, cfg.detectRoot, "switch_detect_root") { v -> vm.updateConfig { it.copy(detectRoot = v) } },
-    ToggleSpec(INFO_DETECT_EMULATOR, cfg.detectEmulator, "switch_detect_emulator") { v -> vm.updateConfig { it.copy(detectEmulator = v) } },
-    ToggleSpec(INFO_DETECT_XPOSED, cfg.detectXposed, "switch_detect_xposed") { v -> vm.updateConfig { it.copy(detectXposed = v) } },
     ToggleSpec(INFO_DETECT_DEBUGGER, cfg.detectDebugger, "switch_detect_debugger") { v -> vm.updateConfig { it.copy(detectDebugger = v) } },
     ToggleSpec(INFO_ANTI_SCREENSHOT, cfg.antiScreenshot, "switch_anti_screenshot") { v -> vm.updateConfig { it.copy(antiScreenshot = v) } },
     ToggleSpec(INFO_ANTI_TAMPERING, cfg.antiTampering, "switch_anti_tampering") { v -> vm.updateConfig { it.copy(antiTampering = v) } },
     ToggleSpec(INFO_SIGNATURE_PINNING, cfg.signaturePinning, "switch_signature_pinning") { v -> vm.updateConfig { it.copy(signaturePinning = v) } },
     ToggleSpec(INFO_ANTI_DUMP, cfg.antiDump, "switch_anti_dump") { v -> vm.updateConfig { it.copy(antiDump = v) } },
+    ToggleSpec(INFO_DEX_INTEGRITY, cfg.dexIntegrityProtection, "switch_dex_integrity") { v -> vm.updateConfig { it.copy(dexIntegrityProtection = v) } },
+    ToggleSpec(INFO_DISABLE_BACKUP, cfg.disableBackup, "switch_disable_backup") { v -> vm.updateConfig { it.copy(disableBackup = v) } },
 )
 
 private fun binaryHardeningToggles(cfg: ProtectionConfig, vm: MainViewModel) = listOf(
     ToggleSpec(INFO_DSPRO_ENCRYPT, cfg.dsProDexEncryption, "switch_dspro_dex_encryption") { v -> vm.updateConfig { it.copy(dsProDexEncryption = v) } },
+    ToggleSpec(INFO_STRING_ENCRYPTION, cfg.stringEncryption, "switch_string_encryption") { v -> vm.updateConfig { it.copy(stringEncryption = v) } },
+    ToggleSpec(INFO_CONTROL_FLOW, cfg.controlFlowObfuscation, "switch_control_flow") { v -> vm.updateConfig { it.copy(controlFlowObfuscation = v) } },
+    ToggleSpec(INFO_RESOURCE_ENCRYPTION, cfg.resourceEncryption, "switch_resource_encryption") { v -> vm.updateConfig { it.copy(resourceEncryption = v) } },
     ToggleSpec(INFO_DISABLE_DEBUGGABLE, cfg.disableDebuggable, "switch_disable_debuggable") { v -> vm.updateConfig { it.copy(disableDebuggable = v) } },
-    ToggleSpec(INFO_DISABLE_BACKUP, cfg.disableBackup, "switch_disable_backup") { v -> vm.updateConfig { it.copy(disableBackup = v) } },
     ToggleSpec(INFO_STRIP_DEX_DEBUG, cfg.stripDexDebug, "switch_strip_dex_debug") { v -> vm.updateConfig { it.copy(stripDexDebug = v) } },
-    ToggleSpec(INFO_STRIP_BLOAT, cfg.stripMetadataBloat, "switch_strip_bloat") { v -> vm.updateConfig { it.copy(stripMetadataBloat = v) } },
-    ToggleSpec(INFO_BEST_COMPRESSION, cfg.bestCompression, "switch_best_compression") { v -> vm.updateConfig { it.copy(bestCompression = v) } },
 )

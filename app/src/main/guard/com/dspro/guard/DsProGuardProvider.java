@@ -9,6 +9,10 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.content.pm.SigningInfo;
+import android.content.res.AssetManager;
+import android.content.res.Resources;
+import android.content.res.loader.ResourcesLoader;
+import android.content.res.loader.ResourcesProvider;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -16,6 +20,7 @@ import android.os.Bundle;
 import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.util.Log;
 import android.view.WindowManager;
@@ -26,20 +31,27 @@ import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.zip.Adler32;
 import java.util.zip.Inflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -51,23 +63,33 @@ import javax.crypto.spec.SecretKeySpec;
 /**
  * Runtime protection guard compiled into ds_pro_guard.dex and injected into protected APKs.
  * Reads encrypted binary security configuration from assets/dspro_guard.bin, wipes keys immediately,
- * enforces checks at startup/Activity resume, and runs a burst-polling anti-dump watchdog thread.
+ * dynamically mounts encrypted assets from assets/dspro_res.bin when present, enforces DEX Integrity
+ * Protection & runtime security checks via flattened control-flow dispatch, and runs a burst watchdog.
  */
 public final class DsProGuardProvider extends ContentProvider {
 
     private static final String TAG = "DsProGuard";
 
     private static final int FLAG_DETECT_ROOT = 1;
-    private static final int FLAG_DETECT_EMULATOR = 1 << 1;
-    private static final int FLAG_DETECT_XPOSED = 1 << 3;
     private static final int FLAG_DETECT_DEBUGGER = 1 << 4;
     private static final int FLAG_ANTI_SCREENSHOT = 1 << 5;
     private static final int FLAG_ANTI_TAMPERING = 1 << 6;
     private static final int FLAG_SIGNATURE_PINNING = 1 << 7;
     private static final int FLAG_ANTI_DUMP = 1 << 8;
+    private static final int FLAG_DEX_INTEGRITY = 1 << 9;
 
     private static final String POLICY_ASSET = /*O*/"dspro_guard.bin"/*O*/;
+    private static final String RESOURCE_VAULT_ASSET = /*O*/"assets/dspro_res.bin"/*O*/;
+    private static final String CORE_LOADER_CLASS = "com.dspro.core.DsProCoreLoader";
     private static volatile boolean watchdogStarted = false;
+
+    private static volatile boolean resourcesMounted = false;
+    private static volatile Object cachedResourcesLoader = null;
+    private static volatile String cachedLegacyAssetPath = null;
+    private static final Map<Resources, Boolean> attachedResourcesMap =
+        Collections.synchronizedMap(new WeakHashMap<Resources, Boolean>());
+    private static final Map<AssetManager, Boolean> attachedAssetsMap =
+        Collections.synchronizedMap(new WeakHashMap<AssetManager, Boolean>());
 
     static String _xs(int seed, byte[] data) {
         byte[] out = new byte[data.length];
@@ -81,11 +103,18 @@ public final class DsProGuardProvider extends ContentProvider {
         final int flags;
         final String pinnedCertSha256;
         final List<String> integrityEntries;
+        final List<String> dexIntegrityEntries;
 
-        GuardPolicy(int flags, String pinnedCertSha256, List<String> integrityEntries) {
+        GuardPolicy(
+            int flags,
+            String pinnedCertSha256,
+            List<String> integrityEntries,
+            List<String> dexIntegrityEntries
+        ) {
             this.flags = flags;
             this.pinnedCertSha256 = pinnedCertSha256;
             this.integrityEntries = integrityEntries;
+            this.dexIntegrityEntries = dexIntegrityEntries;
         }
 
         boolean has(int flag) {
@@ -100,6 +129,8 @@ public final class DsProGuardProvider extends ContentProvider {
             return true;
         }
 
+        mountEncryptedResourcesIfNeeded(context);
+
         final GuardPolicy policy = readEncryptedPolicy(context);
         if (policy == null) {
             return true;
@@ -110,90 +141,282 @@ public final class DsProGuardProvider extends ContentProvider {
         final boolean antiScreenshot = policy.has(FLAG_ANTI_SCREENSHOT);
         final boolean detectDebugger = policy.has(FLAG_DETECT_DEBUGGER);
         final boolean antiDump = policy.has(FLAG_ANTI_DUMP);
-        final boolean detectXposed = policy.has(FLAG_DETECT_XPOSED);
         final boolean antiTampering = policy.has(FLAG_ANTI_TAMPERING);
+        final boolean dexIntegrity = policy.has(FLAG_DEX_INTEGRITY);
 
-        if (antiScreenshot || detectDebugger || antiDump || detectXposed) {
-            final Context appCtx = context.getApplicationContext();
-            if (appCtx instanceof Application) {
-                ((Application) appCtx).registerActivityLifecycleCallbacks(
-                    new Application.ActivityLifecycleCallbacks() {
-                        @Override
-                        public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
-                            if (antiScreenshot && activity.getWindow() != null) {
-                                activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-                            }
-                        }
-
-                        @Override
-                        public void onActivityStarted(Activity activity) {
-                        }
-
-                        @Override
-                        public void onActivityResumed(Activity activity) {
-                            if (antiScreenshot && activity.getWindow() != null) {
-                                activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-                            }
-                            if (detectDebugger && isDebuggerAttached()) {
-                                crashWithReason(/*O*/"Debugger detected"/*O*/);
-                            }
-                            if (detectXposed && isHookingClassPresent()) {
-                                crashWithReason(/*O*/"Xposed / Frida hooking detected"/*O*/);
-                            }
-                        }
-
-                        @Override
-                        public void onActivityPaused(Activity activity) {
-                        }
-
-                        @Override
-                        public void onActivityStopped(Activity activity) {
-                        }
-
-                        @Override
-                        public void onActivitySaveInstanceState(Activity activity, Bundle outState) {
-                        }
-
-                        @Override
-                        public void onActivityDestroyed(Activity activity) {
-                        }
-                    }
-                );
-            }
+        final Context appCtx = context.getApplicationContext();
+        if (appCtx != null) {
+            attachResourcesIfMounted(appCtx);
         }
 
-        if (antiDump || detectXposed || detectDebugger || antiTampering) {
-            startLiveWatchdog(context.getApplicationContext(), policy);
+        if (appCtx instanceof Application) {
+            ((Application) appCtx).registerActivityLifecycleCallbacks(
+                new Application.ActivityLifecycleCallbacks() {
+                    @Override
+                    public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
+                        attachResourcesIfMounted(activity);
+                        if (antiScreenshot && activity.getWindow() != null) {
+                            activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                        }
+                    }
+
+                    @Override
+                    public void onActivityStarted(Activity activity) {
+                    }
+
+                    @Override
+                    public void onActivityResumed(Activity activity) {
+                        if (antiScreenshot && activity.getWindow() != null) {
+                            activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                        }
+                        if (detectDebugger && isDebuggerAttached()) {
+                            crashWithReason(/*O*/"Debugger detected"/*O*/);
+                        }
+                    }
+
+                    @Override
+                    public void onActivityPaused(Activity activity) {
+                    }
+
+                    @Override
+                    public void onActivityStopped(Activity activity) {
+                    }
+
+                    @Override
+                    public void onActivitySaveInstanceState(Activity activity, Bundle outState) {
+                    }
+
+                    @Override
+                    public void onActivityDestroyed(Activity activity) {
+                    }
+                }
+            );
+        }
+
+        if (antiDump || detectDebugger || antiTampering || dexIntegrity) {
+            startLiveWatchdog(appCtx != null ? appCtx : context, policy);
         }
 
         return true;
     }
 
-    private static void enforceChecks(Context context, GuardPolicy policy) {
-        if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
-            crashWithReason(/*O*/"Debugger detected"/*O*/);
+    private static synchronized void mountEncryptedResourcesIfNeeded(Context context) {
+        if (context == null || Process.isIsolated()) {
+            return;
         }
-        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(context, true)) {
-            crashWithReason(/*O*/"Memory / APK dumper detected"/*O*/);
+        // Delegate to DsProCoreLoader when Core DEX is already present so assets decrypt only once.
+        try {
+            Class<?> coreCls = Class.forName(CORE_LOADER_CLASS, false, context.getClassLoader());
+            Method mountMethod = coreCls.getDeclaredMethod("mountEncryptedResources", Context.class);
+            mountMethod.setAccessible(true);
+            mountMethod.invoke(null, context);
+            return;
+        } catch (ClassNotFoundException ignored) {
+        } catch (Throwable t) {
+            if (t.getCause() instanceof SecurityException) {
+                throw (SecurityException) t.getCause();
+            }
         }
-        if (policy.has(FLAG_DETECT_ROOT) && isDeviceRooted()) {
-            crashWithReason(/*O*/"Root detected"/*O*/);
+
+        if (resourcesMounted) {
+            attachResourcesIfMounted(context);
+            return;
         }
-        if (policy.has(FLAG_DETECT_EMULATOR) && isEmulator()) {
-            crashWithReason(/*O*/"Emulator detected"/*O*/);
+
+        String apkPath;
+        String pkg;
+        try {
+            apkPath = context.getPackageCodePath();
+            pkg = context.getPackageName();
+        } catch (Throwable ignored) {
+            return;
         }
-        if (policy.has(FLAG_DETECT_XPOSED) && isHookingFrameworkPresent()) {
-            crashWithReason(/*O*/"Xposed / Frida hooking detected"/*O*/);
+        if (apkPath == null || apkPath.isEmpty() || pkg == null || pkg.isEmpty()) {
+            return;
         }
-        if (policy.has(FLAG_ANTI_TAMPERING) && !verifyCriticalApkIntegrity(context, policy.integrityEntries)) {
-            crashWithReason(/*O*/"APK tampering detected"/*O*/);
-        }
-        if (policy.has(FLAG_SIGNATURE_PINNING)) {
-            final String expectedCert = policy.pinnedCertSha256;
-            if (!expectedCert.isEmpty() && !"UNSIGNED".equalsIgnoreCase(expectedCert)) {
-                if (!verifySigningCert(context, expectedCert)) {
-                    crashWithReason(/*O*/"APK signature mismatch"/*O*/);
+
+        byte[] blob = null;
+        byte[] salt = null;
+        byte[] key = null;
+        byte[] plainZip = null;
+        try (ZipFile zip = new ZipFile(apkPath)) {
+            ZipEntry entry = zip.getEntry(RESOURCE_VAULT_ASSET);
+            if (entry == null) {
+                return;
+            }
+            try (InputStream in = zip.getInputStream(entry)) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.max(4096L, entry.getSize()));
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    out.write(buf, 0, n);
                 }
+                blob = out.toByteArray();
+            }
+            if (blob.length <= 28) {
+                crashWithReason(/*O*/"Encrypted resource vault tampered"/*O*/);
+                return;
+            }
+            salt = new byte[16];
+            byte[] iv = new byte[12];
+            System.arraycopy(blob, 0, salt, 0, 16);
+            System.arraycopy(blob, 16, iv, 0, 12);
+            String saltHex = toLowerHex(salt);
+            key = MessageDigest.getInstance("SHA-256").digest(
+                (pkg + /*O*/":DSPRO_RES_V1:"/*O*/ + saltHex).getBytes(StandardCharsets.UTF_8)
+            );
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
+            plainZip = cipher.doFinal(blob, 28, blob.length - 28);
+
+            File cacheDir = context.getCodeCacheDir();
+            if (cacheDir == null) {
+                cacheDir = context.getCacheDir();
+            }
+            if (cacheDir != null && !cacheDir.exists()) {
+                cacheDir.mkdirs();
+            }
+
+            if (Build.VERSION.SDK_INT >= 30) {
+                File tmp = File.createTempFile(/*O*/".dspro_rv_"/*O*/, ".apk", cacheDir);
+                try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                    fos.write(plainZip);
+                    fos.flush();
+                }
+                ParcelFileDescriptor pfd = ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY);
+                tmp.delete();
+                try {
+                    ResourcesLoader loader = new ResourcesLoader();
+                    loader.addProvider(ResourcesProvider.loadFromApk(pfd));
+                    cachedResourcesLoader = loader;
+                } finally {
+                    try {
+                        pfd.close();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            } else {
+                File vaultFile = new File(cacheDir, /*O*/".dspro_rv_"/*O*/ + Integer.toHexString(apkPath.hashCode()) + ".apk");
+                if (vaultFile.exists()) {
+                    vaultFile.setWritable(true);
+                    vaultFile.delete();
+                }
+                try (FileOutputStream fos = new FileOutputStream(vaultFile)) {
+                    fos.write(plainZip);
+                    fos.flush();
+                }
+                vaultFile.setReadOnly();
+                vaultFile.deleteOnExit();
+                cachedLegacyAssetPath = vaultFile.getAbsolutePath();
+            }
+            resourcesMounted = true;
+            attachResourcesIfMounted(context);
+        } catch (SecurityException se) {
+            throw se;
+        } catch (Throwable t) {
+            crashWithReason(/*O*/"Encrypted resource vault verification failed"/*O*/);
+        } finally {
+            wipe(blob);
+            wipe(salt);
+            wipe(key);
+            wipe(plainZip);
+        }
+    }
+
+    private static void attachResourcesIfMounted(Context context) {
+        if (context == null) {
+            return;
+        }
+        try {
+            Class<?> coreCls = Class.forName(CORE_LOADER_CLASS, false, context.getClassLoader());
+            Method attachMethod = coreCls.getDeclaredMethod("attachResourcesIfMounted", Context.class);
+            attachMethod.setAccessible(true);
+            attachMethod.invoke(null, context);
+            return;
+        } catch (ClassNotFoundException ignored) {
+        } catch (Throwable ignored) {
+        }
+
+        if (!resourcesMounted) {
+            return;
+        }
+        try {
+            Resources res = context.getResources();
+            if (res == null) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 30 && cachedResourcesLoader instanceof ResourcesLoader) {
+                synchronized (attachedResourcesMap) {
+                    if (!Boolean.TRUE.equals(attachedResourcesMap.get(res))) {
+                        res.addLoaders((ResourcesLoader) cachedResourcesLoader);
+                        attachedResourcesMap.put(res, Boolean.TRUE);
+                    }
+                }
+            } else if (cachedLegacyAssetPath != null) {
+                AssetManager am = res.getAssets();
+                if (am != null) {
+                    synchronized (attachedAssetsMap) {
+                        if (!Boolean.TRUE.equals(attachedAssetsMap.get(am))) {
+                            Method addAssetPath = AssetManager.class.getDeclaredMethod("addAssetPath", String.class);
+                            addAssetPath.setAccessible(true);
+                            addAssetPath.invoke(am, cachedLegacyAssetPath);
+                            attachedAssetsMap.put(am, Boolean.TRUE);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void enforceChecks(Context context, GuardPolicy policy) {
+        int state = 0x107;
+        while (state != 0) {
+            switch (state) {
+                case 0x107:
+                    if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
+                        crashWithReason(/*O*/"Debugger detected"/*O*/);
+                    }
+                    state = 0x219;
+                    break;
+                case 0x219:
+                    if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(context, true)) {
+                        crashWithReason(/*O*/"Memory / APK dumper detected"/*O*/);
+                    }
+                    state = 0x34A;
+                    break;
+                case 0x34A:
+                    if (policy.has(FLAG_DETECT_ROOT) && isDeviceRooted()) {
+                        crashWithReason(/*O*/"Root detected"/*O*/);
+                    }
+                    state = 0x47C;
+                    break;
+                case 0x47C:
+                    if (policy.has(FLAG_DEX_INTEGRITY) && !verifyDexIntegrity(context, policy.dexIntegrityEntries)) {
+                        crashWithReason(/*O*/"DEX integrity violation detected"/*O*/);
+                    }
+                    state = 0x591;
+                    break;
+                case 0x591:
+                    if (policy.has(FLAG_ANTI_TAMPERING) && !verifyCriticalApkIntegrity(context, policy.integrityEntries)) {
+                        crashWithReason(/*O*/"APK tampering detected"/*O*/);
+                    }
+                    state = 0x6B3;
+                    break;
+                case 0x6B3:
+                    if (policy.has(FLAG_SIGNATURE_PINNING)) {
+                        final String expectedCert = policy.pinnedCertSha256;
+                        if (!expectedCert.isEmpty() && !"UNSIGNED".equalsIgnoreCase(expectedCert)) {
+                            if (!verifySigningCert(context, expectedCert)) {
+                                crashWithReason(/*O*/"APK signature mismatch"/*O*/);
+                            }
+                        }
+                    }
+                    state = 0;
+                    break;
+                default:
+                    state = 0;
+                    break;
             }
         }
     }
@@ -227,9 +450,11 @@ public final class DsProGuardProvider extends ContentProvider {
                             triggerMainCrash(mainHandler, /*O*/"Runtime memory / DEX dump blocked"/*O*/);
                             return;
                         }
-                        if (policy.has(FLAG_DETECT_XPOSED) && (deepScan ? isHookingFrameworkPresent() : (isHookingClassPresent() || hasHookedSystemMethods()))) {
-                            triggerMainCrash(mainHandler, /*O*/"Runtime hooking framework detected"/*O*/);
-                            return;
+                        if (policy.has(FLAG_DEX_INTEGRITY) && (cycle % 16 == 0)) {
+                            if (!verifyDexIntegrity(appContext, policy.dexIntegrityEntries)) {
+                                triggerMainCrash(mainHandler, /*O*/"DEX integrity violation detected"/*O*/);
+                                return;
+                            }
                         }
                         if (policy.has(FLAG_ANTI_TAMPERING) && (cycle % 24 == 0)) {
                             if (!verifyApkIntegrity(appContext, policy.integrityEntries)) {
@@ -309,7 +534,7 @@ public final class DsProGuardProvider extends ContentProvider {
             );
             plain = cipher.doFinal(blob, 28, blob.length - 28);
             String text = new String(plain, StandardCharsets.UTF_8);
-            String[] lines = text.split("\n");
+            String[] lines = text.split("\n", -1);
             if (lines.length < 3) {
                 crashWithReason(/*O*/"Security policy tampered"/*O*/);
                 return null;
@@ -324,7 +549,25 @@ public final class DsProGuardProvider extends ContentProvider {
                     integrityEntries.add(row);
                 }
             }
-            return new GuardPolicy(flags, pinnedCert, Collections.unmodifiableList(integrityEntries));
+            int dexCountIdx = 3 + integrityCount;
+            List<String> dexIntegrityEntries = Collections.emptyList();
+            if (dexCountIdx < lines.length && !lines[dexCountIdx].trim().isEmpty()) {
+                int dexIntegrityCount = Integer.parseInt(lines[dexCountIdx].trim());
+                List<String> parsedDex = new ArrayList<>(Math.max(0, dexIntegrityCount));
+                for (int i = 0; i < dexIntegrityCount && (dexCountIdx + 1 + i) < lines.length; i++) {
+                    String row = lines[dexCountIdx + 1 + i].trim();
+                    if (!row.isEmpty()) {
+                        parsedDex.add(row);
+                    }
+                }
+                dexIntegrityEntries = Collections.unmodifiableList(parsedDex);
+            }
+            return new GuardPolicy(
+                flags,
+                pinnedCert,
+                Collections.unmodifiableList(integrityEntries),
+                dexIntegrityEntries
+            );
         } catch (SecurityException se) {
             throw se;
         } catch (Throwable t) {
@@ -336,6 +579,117 @@ public final class DsProGuardProvider extends ContentProvider {
             wipe(keyBytes);
             wipe(plain);
         }
+    }
+
+    private static boolean verifyDexIntegrity(Context context, List<String> expectedEntries) {
+        if (context == null || expectedEntries == null || expectedEntries.isEmpty()) {
+            return false;
+        }
+        try (ZipFile apkZip = new ZipFile(context.getPackageCodePath())) {
+            Map<String, String> expectedByName = new HashMap<>(expectedEntries.size());
+            for (String row : expectedEntries) {
+                String[] parts = row.split("\\|", 4);
+                if (parts.length != 4) {
+                    return false;
+                }
+                expectedByName.put(parts[3].trim(), row);
+            }
+
+            // Ensure no extra/untracked classes*.dex was injected into the APK root
+            int apkDexCount = 0;
+            Enumeration<? extends ZipEntry> entries = apkZip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry e = entries.nextElement();
+                String name = e.getName();
+                if (isRootClassesDex(name)) {
+                    apkDexCount++;
+                    if (!expectedByName.containsKey(name)) {
+                        return false;
+                    }
+                }
+            }
+            if (apkDexCount != expectedByName.size()) {
+                return false;
+            }
+
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+            MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+            for (Map.Entry<String, String> target : expectedByName.entrySet()) {
+                String entryName = target.getKey();
+                String[] parts = target.getValue().split("\\|", 4);
+                String expectedSha256 = parts[0].trim().toLowerCase(Locale.US);
+                long expectedAdler = Long.parseLong(parts[1].trim());
+                int expectedSize = Integer.parseInt(parts[2].trim());
+
+                ZipEntry entry = apkZip.getEntry(entryName);
+                if (entry == null) {
+                    return false;
+                }
+                byte[] dexBytes;
+                try (InputStream in = apkZip.getInputStream(entry)) {
+                    ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(1024, expectedSize));
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                    }
+                    dexBytes = out.toByteArray();
+                }
+
+                if (dexBytes.length != expectedSize || dexBytes.length < 0x70) {
+                    return false;
+                }
+                if (dexBytes[0] != 'd' || dexBytes[1] != 'e' || dexBytes[2] != 'x' || dexBytes[3] != '\n') {
+                    return false;
+                }
+                ByteBuffer hdr = ByteBuffer.wrap(dexBytes, 0, 0x70).order(ByteOrder.LITTLE_ENDIAN);
+                if (hdr.getInt(32) != dexBytes.length || hdr.getInt(36) != 0x70 || hdr.getInt(40) != 0x12345678) {
+                    return false;
+                }
+
+                long headerAdler = hdr.getInt(8) & 0xFFFFFFFFL;
+                Adler32 adler = new Adler32();
+                adler.update(dexBytes, 12, dexBytes.length - 12);
+                if (headerAdler != expectedAdler || adler.getValue() != headerAdler) {
+                    return false;
+                }
+
+                sha1.reset();
+                sha1.update(dexBytes, 32, dexBytes.length - 32);
+                byte[] actualSha1 = sha1.digest();
+                for (int i = 0; i < 20; i++) {
+                    if (actualSha1[i] != dexBytes[12 + i]) {
+                        return false;
+                    }
+                }
+
+                sha256.reset();
+                sha256.update(dexBytes);
+                if (!expectedSha256.equals(toLowerHex(sha256.digest()))) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static boolean isRootClassesDex(String name) {
+        if (name == null || !name.startsWith("classes") || !name.endsWith(".dex") || name.indexOf('/') >= 0) {
+            return false;
+        }
+        String middle = name.substring("classes".length(), name.length() - ".dex".length());
+        if (middle.isEmpty()) {
+            return true;
+        }
+        for (int i = 0; i < middle.length(); i++) {
+            char c = middle.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static void wipe(byte[] bytes) {
@@ -695,84 +1049,6 @@ public final class DsProGuardProvider extends ContentProvider {
             }
         }
         return containsInFile(/*O*/"/proc/mounts"/*O*/, /*O*/"magisk"/*O*/, /*O*/"kernelsu"/*O*/, /*O*/"apatch"/*O*/);
-    }
-
-    private static boolean isEmulator() {
-        String fp = safeLower(Build.FINGERPRINT);
-        String model = safeLower(Build.MODEL);
-        String manufacturer = safeLower(Build.MANUFACTURER);
-        String brand = safeLower(Build.BRAND);
-        String device = safeLower(Build.DEVICE);
-        String product = safeLower(Build.PRODUCT);
-        String hardware = safeLower(Build.HARDWARE);
-
-        if (fp.startsWith("generic")
-            || fp.startsWith("unknown")
-            || fp.contains("emulator")
-            || fp.contains("sdk_gphone")
-            || model.contains("google_sdk")
-            || model.contains("emulator")
-            || model.contains("android sdk built for")
-            || manufacturer.contains("genymotion")
-            || (brand.startsWith("generic") && device.startsWith("generic"))
-            || "google_sdk".equals(product)
-            || product.contains("sdk_gphone")
-            || product.contains("vbox86p")
-            || hardware.contains("goldfish")
-            || hardware.contains("ranchu")
-            || hardware.contains("vbox86")
-            || hardware.contains("nox")) {
-            return true;
-        }
-
-        return new File(/*O*/"/dev/socket/qemud"/*O*/).exists()
-            || new File(/*O*/"/dev/qemu_pipe"/*O*/).exists()
-            || new File(/*O*/"/system/lib/libc_malloc_debug_qemu.so"/*O*/).exists();
-    }
-
-    private static boolean isHookingClassPresent() {
-        try {
-            Class.forName(/*O*/"de.robv.android.xposed.XposedBridge"/*O*/);
-            return true;
-        } catch (Throwable ignored) {
-        }
-        return false;
-    }
-
-    private static boolean isHookingFrameworkPresent() {
-        if (isHookingClassPresent() || hasHookedSystemMethods()) {
-            return true;
-        }
-
-        for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
-            String cls = safeLower(el.getClassName());
-            if (cls.contains(/*O*/"xposed"/*O*/)
-                || cls.contains(/*O*/"lsposed"/*O*/)
-                || cls.contains(/*O*/"lsphooker"/*O*/)
-                || cls.contains(/*O*/"edhooker"/*O*/)
-                || cls.contains(/*O*/"sandhook"/*O*/)
-                || cls.contains(/*O*/"substrate"/*O*/)
-                || cls.contains(/*O*/"frida"/*O*/)) {
-                return true;
-            }
-        }
-
-        return containsInFile(
-            /*O*/"/proc/self/maps"/*O*/,
-            /*O*/"xposed"/*O*/,
-            /*O*/"lsposed"/*O*/,
-            /*O*/"lspd"/*O*/,
-            /*O*/"edxposed"/*O*/,
-            /*O*/"frida-agent"/*O*/,
-            /*O*/"frida-gadget"/*O*/,
-            /*O*/"re.frida"/*O*/,
-            /*O*/"memfd:frida"/*O*/,
-            /*O*/"hluda"/*O*/,
-            /*O*/"florida"/*O*/,
-            /*O*/"linjector"/*O*/,
-            /*O*/"libsubstrate"/*O*/,
-            /*O*/"zygisk"/*O*/
-        ) || hasSuspiciousThreadNames(/*O*/"gum-js-loop"/*O*/, /*O*/"pool-frida"/*O*/, /*O*/"linjector"/*O*/);
     }
 
     private static boolean isDebuggerAttached() {

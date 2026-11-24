@@ -123,6 +123,11 @@ class ApkAnalyzerEngine(private val context: Context) {
 
         val packageName = pmPackageName ?: manifestSummary?.packageName.orEmpty().ifBlank { "unknown.package" }
 
+        val pmProtectionId = appInfo?.metaData
+            ?.getString(AxmlManifestPatcher.PROTECTION_IDENTIFIER_META_NAME)
+            ?.takeIf { it.isNotBlank() }
+        val protectionIdentifier = manifestSummary?.protectionIdentifier ?: pmProtectionId
+
         return ApkAnalysisResult(
             fileName = displayName,
             cachedApkPath = apkFile.absolutePath,
@@ -142,6 +147,7 @@ class ApkAnalyzerEngine(private val context: Context) {
             allowsBackup = manifestSummary?.allowsBackup ?: true,
             hasGuardProvider = manifestSummary?.hasGuardProvider ?: false,
             hasCoreProtection = manifestSummary?.hasCoreProtection ?: false,
+            protectionIdentifier = protectionIdentifier,
         )
     }
 
@@ -166,10 +172,11 @@ class ApkAnalyzerEngine(private val context: Context) {
         } else {
             PackageManager.GET_SIGNATURES
         }
+        val queryFlags = sigFlag or PackageManager.GET_META_DATA
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.getPackageArchiveInfo(path, PackageManager.PackageInfoFlags.of(sigFlag.toLong()))
+            pm.getPackageArchiveInfo(path, PackageManager.PackageInfoFlags.of(queryFlags.toLong()))
         } else {
-            pm.getPackageArchiveInfo(path, sigFlag)
+            pm.getPackageArchiveInfo(path, queryFlags)
         }
     }
 
@@ -192,15 +199,5 @@ class ApkAnalyzerEngine(private val context: Context) {
             .digest(raw)
             .joinToString(":") { "%02X".format(it) }
         return sha256 to true
-    }
-
-    private fun countOccurrences(haystack: String, needle: String): Int {
-        var count = 0
-        var idx = haystack.indexOf(needle)
-        while (idx != -1) {
-            count++
-            idx = haystack.indexOf(needle, idx + needle.length)
-        }
-        return count
     }
 }
