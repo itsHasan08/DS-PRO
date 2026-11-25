@@ -74,7 +74,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -125,7 +124,7 @@ fun DsProTopBar(
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = PureWhite,
-        shadowElevation = 2.dp,
+        shadowElevation = 0.dp,
     ) {
         Column(
             modifier = Modifier
@@ -364,10 +363,8 @@ fun GridToggleTile(
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(role = Role.Switch) { onCheckedChange(!checked) }
-            .testTag(testTag),
+        onClick = { onCheckedChange(!checked) },
+        modifier = modifier.testTag(testTag),
         shape = RoundedCornerShape(12.dp),
         color = if (checked) accentTint.copy(alpha = 0.7f) else PureWhite,
         border = BorderStroke(1.dp, if (checked) accentColor.copy(alpha = 0.5f) else BorderSubtle),
@@ -461,9 +458,9 @@ private fun DsProToggleSwitch(
                     val mid = (1f - kotlin.math.abs(p - 0.5f) * 2f).coerceAtLeast(0f)
                     scaleX = 1f + (mid * 0.14f)
                 }
-                .shadow(elevation = 1.5.dp, shape = CircleShape, clip = false)
                 .clip(CircleShape)
-                .background(PureWhite),
+                .background(PureWhite)
+                .border(0.75.dp, Color.Black.copy(alpha = 0.08f), CircleShape),
         )
     }
 }
@@ -477,6 +474,8 @@ fun ProtectionPipelineCard(
     runResult: ProtectionRunResult?,
     isExported: Boolean,
     exportedSizeBytes: Long?,
+    exportedFileName: String? = null,
+    exportedFolderLabel: String? = null,
     onExportClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -691,44 +690,81 @@ fun ProtectionPipelineCard(
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        Box(
+                    if (isExported) {
+                        Surface(
                             modifier = Modifier
-                                .size(38.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(SuccessTint),
-                            contentAlignment = Alignment.Center,
+                                .fillMaxWidth()
+                                .testTag("save_complete_banner"),
+                            shape = RoundedCornerShape(12.dp),
+                            color = SuccessTint,
+                            border = BorderStroke(1.dp, SuccessEmerald.copy(alpha = 0.45f)),
                         ) {
-                            Icon(
-                                imageVector = if (isExported) Icons.Filled.CheckCircle else Icons.Filled.Folder,
-                                contentDescription = null,
-                                tint = SuccessEmerald,
-                                modifier = Modifier.size(20.dp),
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CheckCircle,
+                                    contentDescription = null,
+                                    tint = SuccessEmerald,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    Text(
+                                        text = "Save Complete (${formatBytes(exportedSizeBytes ?: runResult.outputSizeBytes)})",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = SuccessEmerald,
+                                    )
+                                    Text(
+                                        text = buildString {
+                                            append(exportedFileName ?: "Protected APK")
+                                            append(" saved to ")
+                                            append(exportedFolderLabel ?: "device storage")
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CharcoalText,
+                                    )
+                                }
+                            }
                         }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (isExported) {
-                                    "APK Saved (${formatBytes(exportedSizeBytes ?: runResult.outputSizeBytes)})"
-                                } else {
-                                    "Protected APK Ready (${formatBytes(runResult.outputSizeBytes)})"
-                                },
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                color = CharcoalText,
-                            )
-                            Text(
-                                text = if (isExported) {
-                                    "Saved to your selected folder. Tap below only if you want another copy."
-                                } else {
-                                    "Tap Save APK below to choose where to save the protected file."
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = SlateMuted,
-                            )
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(SuccessTint),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Folder,
+                                    contentDescription = null,
+                                    tint = SuccessEmerald,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Protected APK Ready (${formatBytes(runResult.outputSizeBytes)})",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = CharcoalText,
+                                )
+                                Text(
+                                    text = "Tap Save APK below to save the protected file to storage.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = SlateMuted,
+                                )
+                            }
                         }
                     }
 
@@ -1540,4 +1576,146 @@ fun KeyValueLine(
         )
     }
 }
+
+@Composable
+fun StoragePermissionDialog(
+    onGrantClick: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PureWhite,
+        icon = {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(ProBlueTint),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Folder,
+                    contentDescription = null,
+                    tint = ProBlue,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        },
+        title = {
+            Text(
+                text = "Storage Permission Required",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = CharcoalText,
+            )
+        },
+        text = {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = SectionGrey,
+                border = BorderStroke(1.dp, BorderSubtle),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "Allow DS PRO to access your selected storage folder so protected APKs can be saved directly without issues.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CharcoalText,
+                    )
+                    InfoBulletLine("Select any folder (such as Download or Documents) and tap Allow.")
+                    InfoBulletLine("Your files stay 100% private on your device.")
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onGrantClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ProBlue,
+                    contentColor = PureWhite,
+                ),
+                modifier = Modifier.testTag("grant_storage_permission_button"),
+            ) {
+                Text("Allow Storage", fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("dismiss_storage_permission_button"),
+            ) {
+                Text("Later", color = SlateMuted)
+            }
+        },
+    )
+}
+
+@Composable
+fun SaveCompleteDialog(
+    fileName: String,
+    folderLabel: String,
+    sizeBytes: Long,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PureWhite,
+        icon = {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(CircleShape)
+                    .background(SuccessTint),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = SuccessEmerald,
+                    modifier = Modifier.size(26.dp),
+                )
+            }
+        },
+        title = {
+            Text(
+                text = "APK Saved Successfully",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = CharcoalText,
+            )
+        },
+        text = {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = SectionGrey,
+                border = BorderStroke(1.dp, SuccessEmerald.copy(alpha = 0.35f)),
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    KeyValueLine("Status", "Save Complete")
+                    KeyValueLine("File", fileName, mono = true)
+                    KeyValueLine("Location", folderLabel)
+                    KeyValueLine("Size", formatBytes(sizeBytes))
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SuccessEmerald,
+                    contentColor = PureWhite,
+                ),
+                modifier = Modifier.testTag("save_complete_ok_button"),
+            ) {
+                Text("OK", fontWeight = FontWeight.SemiBold)
+            }
+        },
+    )
+}
+
 

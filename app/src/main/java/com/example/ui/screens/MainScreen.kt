@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
@@ -31,6 +34,8 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Security
@@ -51,6 +56,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.Indicator
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,10 +65,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.engine.formatBytes
 import com.example.domain.model.ProtectionConfig
@@ -76,8 +85,10 @@ import com.example.ui.components.GridGroupHeader
 import com.example.ui.components.GridToggleTile
 import com.example.ui.components.KeyValueLine
 import com.example.ui.components.ProtectionPipelineCard
+import com.example.ui.components.SaveCompleteDialog
 import com.example.ui.components.SectionCard
 import com.example.ui.components.StatusPill
+import com.example.ui.components.StoragePermissionDialog
 import com.example.ui.theme.BorderSubtle
 import com.example.ui.theme.CharcoalText
 import com.example.ui.theme.ErrorRed
@@ -94,6 +105,7 @@ import com.example.ui.theme.WarningTint
 import com.example.ui.viewmodel.MainViewModel
 import kotlinx.coroutines.withTimeoutOrNull
 
+@Immutable
 private data class ToggleSpec(
     val info: ProtectionFeatureInfo,
     val checked: Boolean,
@@ -107,6 +119,7 @@ fun MainScreen(
     viewModel: MainViewModel,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var activeInfoDialog by remember { mutableStateOf<Pair<ProtectionFeatureInfo, Boolean>?>(null) }
     var showDeveloperInfo by remember { mutableStateOf(false) }
@@ -129,19 +142,48 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(uiState.statusMessage) {
-        val msg = uiState.statusMessage
-        if (msg != null) {
-            snackbarHostState.currentSnackbarData?.dismiss()
-            viewModel.clearStatusMessage()
-            withTimeoutOrNull(2200L) {
-                snackbarHostState.showSnackbar(
-                    message = msg,
-                    duration = SnackbarDuration.Indefinite,
-                )
+    val storageTreeLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        viewModel.onStorageTreeSelected(treeUri)
+    }
+
+    val legacyStorageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        viewModel.onLegacyStoragePermissionResult(granted)
+        storageTreeLauncher.launch(null)
+    }
+
+    val requestStoragePermissionFlow = remember(context, legacyStorageLauncher, storageTreeLauncher) {
+        {
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+                val hasLegacy = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!hasLegacy) {
+                    legacyStorageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                } else {
+                    storageTreeLauncher.launch(null)
+                }
+            } else {
+                storageTreeLauncher.launch(null)
             }
-            snackbarHostState.currentSnackbarData?.dismiss()
         }
+    }
+
+    LaunchedEffect(uiState.toastEvent?.id) {
+        val event = uiState.toastEvent ?: return@LaunchedEffect
+        snackbarHostState.currentSnackbarData?.dismiss()
+        withTimeoutOrNull(2800L) {
+            snackbarHostState.showSnackbar(
+                message = event.message,
+                duration = SnackbarDuration.Indefinite,
+            )
+        }
+        snackbarHostState.currentSnackbarData?.dismiss()
+        viewModel.consumeToastEvent(event.id)
     }
 
     val cfg = uiState.config
@@ -153,11 +195,15 @@ fun MainScreen(
         label = "refresh_alpha",
     )
 
-    LaunchedEffect(uiState.isProcessing, uiState.runResult, uiState.selectedApkUri, uiState.isRefreshing) {
-        if (uiState.isProcessing || uiState.runResult != null) {
+    val hasRunResult = uiState.runResult != null
+    LaunchedEffect(uiState.isProcessing, hasRunResult) {
+        if (uiState.isProcessing || hasRunResult) {
             val lastIdx = (gridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
             gridState.animateScrollToItem(lastIdx)
-        } else if (!uiState.isRefreshing && uiState.selectedApkUri == null && gridState.firstVisibleItemIndex > 0) {
+        }
+    }
+    LaunchedEffect(uiState.isRefreshing, uiState.selectedApkUri) {
+        if (!uiState.isRefreshing && uiState.selectedApkUri == null && gridState.firstVisibleItemIndex > 0) {
             gridState.animateScrollToItem(0)
         }
     }
@@ -172,6 +218,25 @@ fun MainScreen(
 
     if (showDeveloperInfo) {
         DeveloperInfoDialog(onDismiss = { showDeveloperInfo = false })
+    }
+
+    if (uiState.showStoragePermissionPrompt) {
+        StoragePermissionDialog(
+            onGrantClick = {
+                viewModel.dismissStoragePermissionPrompt()
+                requestStoragePermissionFlow()
+            },
+            onDismiss = { viewModel.dismissStoragePermissionPrompt() },
+        )
+    }
+
+    if (uiState.showSaveCompleteDialog && uiState.isExported) {
+        SaveCompleteDialog(
+            fileName = uiState.exportedFileName ?: "Protected APK",
+            folderLabel = uiState.exportedFolderLabel ?: "Device Storage",
+            sizeBytes = uiState.exportedSizeBytes ?: (uiState.runResult?.outputSizeBytes ?: 0L),
+            onDismiss = { viewModel.dismissSaveCompleteDialog() },
+        )
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -230,6 +295,43 @@ fun MainScreen(
                             icon = Icons.Filled.FolderOpen,
                             accentColor = ProBlue,
                             accentTint = ProBlueTint,
+                            headerAction = {
+                                val folderGranted = uiState.hasPersistedFolder
+                                Surface(
+                                    onClick = { requestStoragePermissionFlow() },
+                                    shape = RoundedCornerShape(50),
+                                    color = if (folderGranted) SuccessTint else WarningTint,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (folderGranted) SuccessEmerald.copy(alpha = 0.35f) else WarningAmber.copy(alpha = 0.45f),
+                                    ),
+                                    modifier = Modifier.testTag("storage_permission_chip"),
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = if (folderGranted) Icons.Filled.CheckCircle else Icons.Filled.Folder,
+                                            contentDescription = "Select storage permission",
+                                            tint = if (folderGranted) SuccessEmerald else WarningAmber,
+                                            modifier = Modifier.size(13.dp),
+                                        )
+                                        Text(
+                                            text = if (folderGranted) {
+                                                uiState.storageFolderLabel ?: "Storage Allowed"
+                                            } else {
+                                                "Allow Storage"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                            color = if (folderGranted) SuccessEmerald else WarningAmber,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            },
                         ) {
                             Button(
                                 onClick = {
@@ -453,9 +555,20 @@ fun MainScreen(
                                     runResult = uiState.runResult,
                                     isExported = uiState.isExported,
                                     exportedSizeBytes = uiState.exportedSizeBytes,
+                                    exportedFileName = uiState.exportedFileName,
+                                    exportedFolderLabel = uiState.exportedFolderLabel,
                                     onExportClick = {
                                         val pkg = uiState.selectedApk?.packageName ?: "app"
-                                        exportLauncher.launch("${pkg}_dspro_protected.apk")
+                                        if (uiState.hasPersistedFolder) {
+                                            viewModel.saveToGrantedStorageFolder(
+                                                onNeedDocumentPickerFallback = {
+                                                    exportLauncher.launch("${pkg}_dspro_protected.apk")
+                                                },
+                                            )
+                                        } else {
+                                            viewModel.preparePendingSaveAndRequestStorage()
+                                            requestStoragePermissionFlow()
+                                        }
                                     },
                                 )
                             }

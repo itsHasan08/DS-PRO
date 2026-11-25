@@ -258,6 +258,11 @@ class ApkProtectionProcessor(
         )
     }
 
+    fun getStorageAccessStatus(): StorageAccessStatus = fileStorageService.getStorageAccessStatus()
+
+    fun saveStorageTreePermission(treeUri: Uri): StorageAccessStatus =
+        fileStorageService.saveStorageTreeUri(treeUri)
+
     suspend fun exportUnsignedApk(outputApkPath: String, destinationUri: Uri): Result<Long> =
         withContext(Dispatchers.IO) {
             val source = File(outputApkPath)
@@ -267,6 +272,28 @@ class ApkProtectionProcessor(
             }
             fileStorageService.exportCopyToUri(source, destinationUri)
         }
+
+    suspend fun exportUnsignedApkDetailed(outputApkPath: String, destinationUri: Uri): Result<ExportedApkInfo> =
+        withContext(Dispatchers.IO) {
+            val source = File(outputApkPath)
+            val (valid, reason) = verifyOutputApk(source)
+            if (!valid) {
+                return@withContext Result.failure(IllegalStateException(reason))
+            }
+            fileStorageService.exportCopyWithDetailsToUri(source, destinationUri)
+        }
+
+    suspend fun exportUnsignedApkToStorageFolder(
+        outputApkPath: String,
+        fileName: String,
+    ): Result<ExportedApkInfo> = withContext(Dispatchers.IO) {
+        val source = File(outputApkPath)
+        val (valid, reason) = verifyOutputApk(source)
+        if (!valid) {
+            return@withContext Result.failure(IllegalStateException(reason))
+        }
+        fileStorageService.exportToGrantedStorageFolder(source, fileName)
+    }
 
     suspend fun clearWorkCache() = withContext(Dispatchers.IO) {
         clearCacheDirectories(

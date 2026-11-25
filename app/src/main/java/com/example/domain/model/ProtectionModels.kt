@@ -1,10 +1,13 @@
 package com.example.domain.model
 
+import androidx.compose.runtime.Immutable
+
 enum class ProtectionSection(val label: String) {
     RUNTIME_GUARD("Runtime Guard"),
     BINARY_HARDENING("DS PRO & APK Hardening"),
 }
 
+@Immutable
 data class ProtectionFeatureInfo(
     val id: String,
     val title: String,
@@ -13,6 +16,7 @@ data class ProtectionFeatureInfo(
     val protections: List<String> = emptyList(),
 )
 
+@Immutable
 data class ProtectionConfig(
     // Runtime Guard & Assist Protection (all OFF by default — enforced via injected DsProGuardProvider DEX)
     val detectRoot: Boolean = false,
@@ -91,6 +95,7 @@ data class ProtectionConfig(
     }
 }
 
+@Immutable
 data class ApkAnalysisResult(
     val fileName: String,
     val cachedApkPath: String,
@@ -119,6 +124,7 @@ enum class StepStatus {
     SKIPPED,
 }
 
+@Immutable
 data class ProtectionStepResult(
     val id: String,
     val title: String,
@@ -126,6 +132,7 @@ data class ProtectionStepResult(
     val detail: String,
 )
 
+@Immutable
 data class ProtectionRunResult(
     val outputApkPath: String?,
     val outputSizeBytes: Long,
