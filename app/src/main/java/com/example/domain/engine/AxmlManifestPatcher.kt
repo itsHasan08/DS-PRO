@@ -8,6 +8,7 @@ data class AxmlPatchOptions(
     val disableDebuggable: Boolean = false,
     val injectGuardProvider: Boolean = false,
     val enableCoreProtection: Boolean = false,
+    val ensurePlayQueries: Boolean = false,
     val protectionIdentifier: String = "",
     val packageName: String = "",
 )
@@ -17,6 +18,7 @@ data class AxmlPatchResult(
     val debuggableDisabled: Boolean,
     val guardProviderInjected: Boolean,
     val coreProtectionInjected: Boolean = false,
+    val playQueriesInjected: Boolean = false,
     val protectionIdentifierEmbedded: Boolean = false,
     val originalAppClass: String = "",
     val originalFactoryClass: String = "",
@@ -259,6 +261,7 @@ object AxmlManifestPatcher {
         if (!options.disableDebuggable &&
             !options.injectGuardProvider &&
             !options.enableCoreProtection &&
+            !options.ensurePlayQueries &&
             identifier.isEmpty()
         ) {
             return AxmlPatchResult(
@@ -266,6 +269,7 @@ object AxmlManifestPatcher {
                 debuggableDisabled = false,
                 guardProviderInjected = false,
                 coreProtectionInjected = false,
+                playQueriesInjected = false,
                 protectionIdentifierEmbedded = false,
                 manifestPackageName = resolvePackageName(axmlBytes),
             )
@@ -283,6 +287,7 @@ object AxmlManifestPatcher {
         var debuggableDisabled = false
         var guardProviderInjected = false
         var coreProtectionInjected = false
+        var playQueriesInjected = false
         var protectionIdentifierEmbedded = false
         var originalAppClass = ""
         var originalFactoryClass = ""
@@ -472,16 +477,51 @@ object AxmlManifestPatcher {
             protectionIdentifierEmbedded = true
         }
 
+        if (options.ensurePlayQueries) {
+            playQueriesInjected = ensurePlayPackageQueries(doc, appElem)
+        }
+
         return AxmlPatchResult(
             manifestBytes = encode(doc),
             debuggableDisabled = debuggableDisabled,
             guardProviderInjected = guardProviderInjected,
             coreProtectionInjected = coreProtectionInjected,
+            playQueriesInjected = playQueriesInjected,
             protectionIdentifierEmbedded = protectionIdentifierEmbedded,
             originalAppClass = originalAppClass,
             originalFactoryClass = originalFactoryClass,
             manifestPackageName = manifestPkg,
         )
+    }
+
+    fun inspectPlayQueriesForTest(axmlBytes: ByteArray): Set<String> {
+        val doc = parse(axmlBytes)
+        val result = linkedSetOf<String>()
+        var inQueries = false
+        var depth = 0
+        for (chunk in doc.chunks) {
+            when (chunk) {
+                is XmlChunk.StartElement -> {
+                    val tag = doc.strings.getOrNull(chunk.nameIdx)
+                    if (depth == 1 && tag == "queries") {
+                        inQueries = true
+                    } else if (inQueries && depth == 2 && tag == "package") {
+                        val pkg = getAttrStringByNameOrResId(doc, chunk, "name", ATTR_NAME)
+                        if (pkg.isNotBlank()) result += pkg
+                    }
+                    depth++
+                }
+                is XmlChunk.EndElement -> {
+                    depth = (depth - 1).coerceAtLeast(0)
+                    val tag = doc.strings.getOrNull(chunk.nameIdx)
+                    if (depth == 1 && tag == "queries") {
+                        inQueries = false
+                    }
+                }
+                else -> Unit
+            }
+        }
+        return result
     }
 
     fun inspectForTest(axmlBytes: ByteArray): Triple<Boolean?, Boolean?, Boolean> {
@@ -634,6 +674,116 @@ object AxmlManifestPatcher {
             doc.resourceMap.getOrNull(it.nameIdx) == resId || doc.strings.getOrNull(it.nameIdx) == attrName
         } ?: return ""
         return if (attr.dataType == TYPE_STRING) doc.strings.getOrNull(attr.data).orEmpty() else ""
+    }
+
+    private fun ensurePlayPackageQueries(
+        doc: ParsedAxml,
+        appElem: XmlChunk.StartElement,
+    ): Boolean {
+        val targetPackages = listOf("com.android.vending", "com.google.android.gms")
+        val nameAttrIdx = doc.ensureResourceAttrString("name", ATTR_NAME)
+        val androidNsIdx = ensureAndroidNsIndex(doc)
+        val queriesTagIdx = doc.ensurePlainString("queries")
+        val packageTagIdx = doc.ensurePlainString("package")
+
+        var existingQueriesIdx = -1
+        val existingPackages = hashSetOf<String>()
+        var depth = 0
+        var insideQueries = false
+        for (idx in doc.chunks.indices) {
+            when (val chunk = doc.chunks[idx]) {
+                is XmlChunk.StartElement -> {
+                    val tag = doc.strings.getOrNull(chunk.nameIdx)
+                    if (depth == 1 && tag == "queries" && existingQueriesIdx < 0) {
+                        existingQueriesIdx = idx
+                        insideQueries = true
+                    } else if (insideQueries && depth == 2 && tag == "package") {
+                        val pkgName = getAttrStringByNameOrResId(doc, chunk, "name", ATTR_NAME)
+                        if (pkgName.isNotEmpty()) {
+                            existingPackages += pkgName
+                        }
+                    }
+                    depth++
+                }
+                is XmlChunk.EndElement -> {
+                    depth = (depth - 1).coerceAtLeast(0)
+                    if (depth == 1 && doc.strings.getOrNull(chunk.nameIdx) == "queries") {
+                        insideQueries = false
+                    }
+                }
+                else -> Unit
+            }
+        }
+
+        val missingPackages = targetPackages.filter { it !in existingPackages }
+        if (missingPackages.isEmpty()) {
+            return true
+        }
+
+        val lineRef = (doc.chunks.getOrNull(existingQueriesIdx) as? XmlChunk.StartElement)?.lineNumber
+            ?: appElem.lineNumber
+
+        val packageChunks = mutableListOf<XmlChunk>()
+        for (pkg in missingPackages) {
+            val pkgValIdx = doc.ensurePlainString(pkg)
+            packageChunks += XmlChunk.StartElement(
+                lineNumber = lineRef,
+                commentIdx = -1,
+                nsIdx = -1,
+                nameIdx = packageTagIdx,
+                attrStart = 20,
+                attrSize = 20,
+                idIndex = 0,
+                classIndex = 0,
+                styleIndex = 0,
+                attributes = mutableListOf(
+                    AxmlAttribute(
+                        nsIdx = androidNsIdx,
+                        nameIdx = nameAttrIdx,
+                        rawValueIdx = pkgValIdx,
+                        valueSize = 8,
+                        res0 = 0,
+                        dataType = TYPE_STRING,
+                        data = pkgValIdx,
+                    ),
+                ),
+            )
+            packageChunks += XmlChunk.EndElement(
+                lineNumber = lineRef,
+                commentIdx = -1,
+                nsIdx = -1,
+                nameIdx = packageTagIdx,
+            )
+        }
+
+        if (existingQueriesIdx >= 0) {
+            doc.chunks.addAll(existingQueriesIdx + 1, packageChunks)
+        } else {
+            val queriesStart = XmlChunk.StartElement(
+                lineNumber = lineRef,
+                commentIdx = -1,
+                nsIdx = -1,
+                nameIdx = queriesTagIdx,
+                attrStart = 20,
+                attrSize = 20,
+                idIndex = 0,
+                classIndex = 0,
+                styleIndex = 0,
+                attributes = mutableListOf(),
+            )
+            val queriesEnd = XmlChunk.EndElement(
+                lineNumber = lineRef,
+                commentIdx = -1,
+                nsIdx = -1,
+                nameIdx = queriesTagIdx,
+            )
+            val currentAppIdx = doc.chunks.indexOf(appElem).coerceAtLeast(1)
+            val block = mutableListOf<XmlChunk>(queriesStart)
+            block.addAll(packageChunks)
+            block.add(queriesEnd)
+            doc.chunks.addAll(currentAppIdx, block)
+        }
+        return true
     }
 
     private fun normalizeClassName(rawName: String, packageName: String): String {

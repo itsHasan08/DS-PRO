@@ -126,6 +126,10 @@ final class DsProCoreLoader {
         return initialized;
     }
 
+    static boolean isCoreWatchdogStarted() {
+        return coreWatchdogStarted;
+    }
+
     static boolean isInitializedFor(String packageName) {
         return initialized && packageName != null && packageName.equals(initializedPackage);
     }
@@ -331,13 +335,14 @@ final class DsProCoreLoader {
                 int cycle = 0;
                 while (true) {
                     try {
-                        long sleepMs = (cycle < 20) ? 150L : 600L;
+                        long sleepMs = (cycle < 5) ? 600L : 3000L;
                         Thread.sleep(sleepMs);
                     } catch (InterruptedException ignored) {
                         return;
                     }
                     try {
-                        String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, (cycle % 4 == 0));
+                        boolean deepScan = (cycle % 6 == 0);
+                        String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, deepScan, false);
                         if (threat != null) {
                             fatalTerminate(mainHandler, threat);
                             return;
@@ -351,6 +356,7 @@ final class DsProCoreLoader {
                 }
             }
         }, /*O*/"dspro-core-mon"/*O*/);
+        t.setPriority(Thread.MIN_PRIORITY);
         t.setDaemon(true);
         t.start();
     }
@@ -394,7 +400,7 @@ final class DsProCoreLoader {
     }
 
     static void enforcePreDecryptAntiDump(String apkPath, String dataDir, String packageName, boolean strictAntiDump) {
-        String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, true);
+        String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, true, true);
         if (threat != null) {
             throw new SecurityException(threat);
         }
@@ -405,7 +411,8 @@ final class DsProCoreLoader {
         String dataDir,
         String packageName,
         boolean strictAntiDump,
-        boolean deepScan
+        boolean deepScan,
+        boolean includeDeepStartupChecks
     ) {
         if (strictAntiDump && (Debug.isDebuggerConnected() || Debug.waitingForDebugger())) {
             return /*O*/"DS PRO Protection: Memory debugger blocked"/*O*/;
@@ -413,22 +420,20 @@ final class DsProCoreLoader {
         if (hasTracerAttached()) {
             return /*O*/"DS PRO Protection: Ptrace dump blocked"/*O*/;
         }
-        if (hasHookedCoreMethods(deepScan)) {
-            return /*O*/"DS PRO Protection: Runtime API hook / dumper blocked"/*O*/;
-        }
-        if (hasSuspiciousThreads() || hasSuspiciousOpenFds()) {
+        if (hasSuspiciousJavaThreads()) {
             return /*O*/"DS PRO Protection: Memory dumper detected"/*O*/;
         }
-        if (deepScan) {
-            if (isRunningInVirtualContainer(apkPath, dataDir, packageName)) {
-                return /*O*/"DS PRO Protection: Virtual container / dumper sandbox blocked"/*O*/;
-            }
-            if (hasDumperInMaps() || hasHookedInstrumentation()) {
-                return /*O*/"DS PRO Protection: Memory dumper detected"/*O*/;
-            }
-            if (strictAntiDump && hasDumperSockets()) {
-                return /*O*/"DS PRO Protection: Dumper socket detected"/*O*/;
-            }
+        if (!deepScan) {
+            return null;
+        }
+        if (hasHookedCoreMethods(includeDeepStartupChecks) || hasSuspiciousProcThreads() || hasSuspiciousOpenFds()) {
+            return /*O*/"DS PRO Protection: Memory dumper detected"/*O*/;
+        }
+        if (isRunningInVirtualContainerAndScanMaps(apkPath, dataDir, packageName) || hasHookedInstrumentation()) {
+            return /*O*/"DS PRO Protection: Virtual container / dumper sandbox blocked"/*O*/;
+        }
+        if (strictAntiDump && hasDumperSockets()) {
+            return /*O*/"DS PRO Protection: Dumper socket detected"/*O*/;
         }
         return null;
     }
@@ -478,7 +483,9 @@ final class DsProCoreLoader {
     }
 
     static DecryptedBundle decryptAll(String apkPath, String packageName, String dataDir) {
-        enforcePreDecryptAntiDump(apkPath, dataDir, packageName, false);
+        if (hasTracerAttached() || hasHookedCoreMethods(true)) {
+            throw new SecurityException(/*O*/"DS PRO Protection: Ptrace or runtime hook blocked"/*O*/);
+        }
 
         byte[] salt = null;
         byte[] maskedPepper = null;
@@ -690,6 +697,7 @@ final class DsProCoreLoader {
         byte[] strKey,
         MessageDigest sha256
     ) throws Exception {
+        byte[] metaBuf = new byte[6];
         try (DataInputStream pdis = new DataInputStream(new ByteArrayInputStream(patchPlain))) {
             int count = pdis.readInt();
             for (int i = 0; i < count; i++) {
@@ -698,8 +706,10 @@ final class DsProCoreLoader {
                 if (offset < 0 || length <= 0 || offset + length > dexBytes.length) {
                     throw new SecurityException(/*O*/"DS PRO Protection: Invalid string patch offset"/*O*/);
                 }
-                unlockAsciiSlice(dexBytes, offset, length, strKey, sha256);
+                unlockAsciiSlice(dexBytes, offset, length, strKey, sha256, metaBuf);
             }
+        } finally {
+            Arrays.fill(metaBuf, (byte) 0);
         }
     }
 
@@ -708,18 +718,18 @@ final class DsProCoreLoader {
         int offset,
         int length,
         byte[] key,
-        MessageDigest sha256
+        MessageDigest sha256,
+        byte[] metaBuf
     ) {
+        metaBuf[0] = (byte) (offset >>> 24);
+        metaBuf[1] = (byte) (offset >>> 16);
+        metaBuf[2] = (byte) (offset >>> 8);
+        metaBuf[3] = (byte) offset;
+        metaBuf[4] = (byte) (length >>> 8);
+        metaBuf[5] = (byte) length;
         sha256.reset();
         sha256.update(key);
-        sha256.update(new byte[] {
-            (byte) (offset >>> 24),
-            (byte) (offset >>> 16),
-            (byte) (offset >>> 8),
-            (byte) offset,
-            (byte) (length >>> 8),
-            (byte) length
-        });
+        sha256.update(metaBuf);
         byte[] block = sha256.digest();
         int bPos = 0;
         for (int i = 0; i < length; i++) {
@@ -854,7 +864,7 @@ final class DsProCoreLoader {
         return false;
     }
 
-    private static boolean isRunningInVirtualContainer(String apkPath, String dataDir, String packageName) {
+    private static boolean isRunningInVirtualContainerAndScanMaps(String apkPath, String dataDir, String packageName) {
         if (apkPath != null) {
             String lower = apkPath.toLowerCase(Locale.US);
             if (lower.contains(/*O*/"/data/data/"/*O*/)
@@ -884,6 +894,7 @@ final class DsProCoreLoader {
                 return true;
             }
         }
+        boolean checkPkgInMaps = false;
         String cmdline = readCmdline();
         if (!cmdline.isEmpty()) {
             String lowerCmd = cmdline.toLowerCase(Locale.US);
@@ -903,12 +914,10 @@ final class DsProCoreLoader {
                 return true;
             }
             if (!Process.isIsolated() && packageName != null && !packageName.isEmpty() && !cmdline.startsWith(packageName)) {
-                if (!mapsContainsPackageApk(packageName)) {
-                    return true;
-                }
+                checkPkgInMaps = true;
             }
         }
-        return false;
+        return scanProcMaps(packageName, checkPkgInMaps);
     }
 
     private static String readCmdline() {
@@ -922,21 +931,6 @@ final class DsProCoreLoader {
         } catch (Throwable ignored) {
             return "";
         }
-    }
-
-    private static boolean mapsContainsPackageApk(String packageName) {
-        String lowerPkg = packageName.toLowerCase(Locale.US);
-        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String lower = line.toLowerCase(Locale.US);
-                if (lower.contains(lowerPkg) && lower.contains(".apk")) {
-                    return true;
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return false;
     }
 
     private static boolean hasHookedInstrumentation() {
@@ -966,7 +960,7 @@ final class DsProCoreLoader {
         return false;
     }
 
-    private static boolean hasHookedCoreMethods(boolean checkAllStacks) {
+    private static boolean hasHookedCoreMethods(boolean checkCurrentStack) {
         try {
             Method doFinalMethod = Cipher.class.getDeclaredMethod("doFinal", byte[].class);
             if (Modifier.isNative(doFinalMethod.getModifiers())) {
@@ -999,19 +993,8 @@ final class DsProCoreLoader {
             }
         } catch (Throwable ignored) {
         }
-        if (hasSuspiciousFrames(Thread.currentThread().getStackTrace())) {
+        if (checkCurrentStack && hasSuspiciousFrames(Thread.currentThread().getStackTrace())) {
             return true;
-        }
-        if (checkAllStacks) {
-            try {
-                Map<Thread, StackTraceElement[]> all = Thread.getAllStackTraces();
-                for (StackTraceElement[] frames : all.values()) {
-                    if (hasSuspiciousFrames(frames)) {
-                        return true;
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
         }
         return false;
     }
@@ -1045,11 +1028,16 @@ final class DsProCoreLoader {
         return false;
     }
 
-    private static boolean hasDumperInMaps() {
-        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/))) {
+    private static boolean scanProcMaps(String packageName, boolean requirePkgApk) {
+        String lowerPkg = (requirePkgApk && packageName != null) ? packageName.toLowerCase(Locale.US) : null;
+        boolean foundPkgApk = !requirePkgApk;
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/), 16384)) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String lower = line.toLowerCase(Locale.US);
+                if (!foundPkgApk && lowerPkg != null && lower.contains(lowerPkg) && lower.contains(".apk")) {
+                    foundPkgApk = true;
+                }
                 if (lower.contains(/*O*/"frida"/*O*/)
                     || lower.contains(/*O*/"re.frida"/*O*/)
                     || lower.contains(/*O*/"memfd:frida"/*O*/)
@@ -1084,11 +1072,41 @@ final class DsProCoreLoader {
                 }
             }
         } catch (Throwable ignored) {
+            return false;
+        }
+        return requirePkgApk && !foundPkgApk;
+    }
+
+    private static boolean hasSuspiciousJavaThreads() {
+        try {
+            ThreadGroup root = Thread.currentThread().getThreadGroup();
+            while (root != null && root.getParent() != null) {
+                root = root.getParent();
+            }
+            if (root != null) {
+                int count = root.activeCount();
+                Thread[] list = new Thread[count + 16];
+                int n = root.enumerate(list, true);
+                for (int i = 0; i < n; i++) {
+                    Thread th = list[i];
+                    if (th == null) continue;
+                    String lower = safeLower(th.getName());
+                    if (lower.contains(/*O*/"gum-js-loop"/*O*/)
+                        || lower.contains(/*O*/"pool-frida"/*O*/)
+                        || lower.contains(/*O*/"linjector"/*O*/)
+                        || lower.contains(/*O*/"blackdex"/*O*/)
+                        || lower.contains(/*O*/"fupk3"/*O*/)
+                        || lower.contains(/*O*/"dumpdex"/*O*/)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
         }
         return false;
     }
 
-    private static boolean hasSuspiciousThreads() {
+    private static boolean hasSuspiciousProcThreads() {
         try {
             File taskDir = new File(/*O*/"/proc/self/task"/*O*/);
             File[] tasks = taskDir.listFiles();

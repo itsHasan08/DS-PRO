@@ -2,16 +2,18 @@ package com.dspro.core;
 
 import dalvik.system.BaseDexClassLoader;
 import dalvik.system.PathClassLoader;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Decoupled BaseDexClassLoader host shell.
  * Preserves BaseDexClassLoader / PathClassLoader compatibility for native libraries and
  * ServiceLoader resources via parent, while isolating InMemoryDexClassLoader out of
- * pathList.dexElements and parent chains.
+ * pathList.dexElements and parent chains, and caching resolved classes for instant lookup.
  */
 final class DsProHostClassLoader extends PathClassLoader {
 
     private final Object[] vault;
+    private final ConcurrentHashMap<String, Class<?>> classCache = new ConcurrentHashMap<>(512);
 
     DsProHostClassLoader(String librarySearchPath, ClassLoader parent, ClassLoader memLoader) {
         super("", librarySearchPath, parent);
@@ -22,32 +24,93 @@ final class DsProHostClassLoader extends PathClassLoader {
         return (ClassLoader) vault[0];
     }
 
+    private static boolean isSystemOrCorePrefix(String name) {
+        if (name == null) {
+            return false;
+        }
+        return name.startsWith("java.")
+            || name.startsWith("javax.")
+            || name.startsWith("dalvik.")
+            || name.startsWith("sun.")
+            || name.startsWith("libcore.")
+            || name.startsWith("org.w3c.")
+            || name.startsWith("org.xml.")
+            || name.startsWith("org.json.")
+            || name.startsWith("com.dspro.")
+            || (name.startsWith("android.") && !name.startsWith("android.support."));
+    }
+
     @Override
     protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        if (name != null) {
+            Class<?> cached = classCache.get(name);
+            if (cached != null) {
+                return cached;
+            }
+        }
         Class<?> loaded = findLoadedClass(name);
         if (loaded != null) {
+            if (name != null) {
+                classCache.putIfAbsent(name, loaded);
+            }
             return loaded;
         }
         ClassLoader parent = getParent();
-        if (parent != null) {
+        if (isSystemOrCorePrefix(name) && parent != null) {
             try {
-                return parent.loadClass(name);
+                Class<?> c = parent.loadClass(name);
+                if (c != null && name != null) {
+                    classCache.putIfAbsent(name, c);
+                }
+                return c;
             } catch (ClassNotFoundException ignored) {
             }
         }
-        return findClass(name);
+        ClassLoader m = mem();
+        if (m != null) {
+            try {
+                Class<?> c = m.loadClass(name);
+                if (c != null && name != null) {
+                    classCache.putIfAbsent(name, c);
+                }
+                return c;
+            } catch (ClassNotFoundException ignored) {
+            }
+        }
+        if (parent != null) {
+            Class<?> c = parent.loadClass(name);
+            if (c != null && name != null) {
+                classCache.putIfAbsent(name, c);
+            }
+            return c;
+        }
+        throw new ClassNotFoundException(name);
     }
 
     @Override
     protected Class<?> findClass(String name) throws ClassNotFoundException {
+        if (name != null) {
+            Class<?> cached = classCache.get(name);
+            if (cached != null) {
+                return cached;
+            }
+        }
         ClassLoader m = mem();
         if (m != null) {
             try {
-                return m.loadClass(name);
+                Class<?> c = m.loadClass(name);
+                if (c != null && name != null) {
+                    classCache.putIfAbsent(name, c);
+                }
+                return c;
             } catch (ClassNotFoundException ignored) {
             }
         }
-        return super.findClass(name);
+        Class<?> fallback = super.findClass(name);
+        if (fallback != null && name != null) {
+            classCache.putIfAbsent(name, fallback);
+        }
+        return fallback;
     }
 
     @Override

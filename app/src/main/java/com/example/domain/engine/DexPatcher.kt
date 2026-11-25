@@ -238,7 +238,7 @@ object DexPatcher {
             dos.flush()
         }
 
-        val deflater = Deflater(Deflater.BEST_COMPRESSION)
+        val deflater = Deflater(Deflater.DEFAULT_COMPRESSION)
         val deflatedPatch = ByteArrayOutputStream()
         try {
             val rawBytes = rawPatch.toByteArray()

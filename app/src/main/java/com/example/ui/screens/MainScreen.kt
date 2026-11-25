@@ -489,7 +489,7 @@ private val INFO_ANTI_TAMPERING = ProtectionFeatureInfo(
 private val INFO_ANTI_DUMP = ProtectionFeatureInfo(
     id = "anti_dump",
     title = "Anti Dump",
-    whatTurnsOn = "Activates 150ms burst + continuous Anti-Dump Watchdog across both DsProCoreLoader and DsProGuardProvider.",
+    whatTurnsOn = "Activates low-overhead continuous Anti-Dump Watchdog across DsProCoreLoader and DsProGuardProvider.",
     howItWorks = "Blocks BlackDex/BlackBox/VirtualApp sandboxes (/proc/self/cmdline & maps), Frida/hluda/florida, ART hooks on Cipher/ClassLoader/InMemoryDexClassLoader, and open .dex dump file descriptors in real time.",
 )
 
@@ -542,6 +542,13 @@ private val INFO_ASSIST_ENCRYPT = ProtectionFeatureInfo(
     howItWorks = "Removes plain editable files from assets/ so attackers cannot view or modify them, then transparently decrypts and mounts the protected overlay vault at runtime via Android ResourcesLoader / AssetManager with zero broken functionality.",
 )
 
+private val INFO_DEVICE_CERTIFICATE = ProtectionFeatureInfo(
+    id = "device_certificate",
+    title = "Device Certificate",
+    whatTurnsOn = "Activates Google Play Store / GMS Device Certification, Verified Boot & Hardware Attestation guard with automatic <queries> manifest visibility.",
+    howItWorks = "Verifies that official Google Play Store and Play Services system packages are installed and enabled, Build.TAGS & Verified Boot are intact, and hardware KeyStore RootOfTrust is locked. Displays a warning dialog and crashes if Play Store is disabled or the device lacks valid certification.",
+)
+
 private val INFO_STRIP_DEX_DEBUG = ProtectionFeatureInfo(
     id = "strip_dex_debug",
     title = "Strip DEX Debug",
@@ -557,6 +564,7 @@ private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = list
     ToggleSpec(INFO_ANTI_DUMP, cfg.antiDump, "switch_anti_dump") { v -> vm.updateConfig { it.copy(antiDump = v) } },
     ToggleSpec(INFO_DEX_INTEGRITY, cfg.dexIntegrityProtection, "switch_dex_integrity") { v -> vm.updateConfig { it.copy(dexIntegrityProtection = v) } },
     ToggleSpec(INFO_ASSIST_ENCRYPT, cfg.assistEncrypt, "switch_assist_encrypt") { v -> vm.updateConfig { it.copy(assistEncrypt = v) } },
+    ToggleSpec(INFO_DEVICE_CERTIFICATE, cfg.deviceCertificate, "switch_device_certificate") { v -> vm.updateConfig { it.copy(deviceCertificate = v) } },
 )
 
 private fun binaryHardeningToggles(cfg: ProtectionConfig, vm: MainViewModel) = listOf(

@@ -440,7 +440,7 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `section active counts match 7 upper section and 6 lower section toggles`() {
+    fun `section active counts match 8 upper section and 6 lower section toggles`() {
         val allOn = ProtectionConfig(
             detectRoot = true,
             detectDebugger = true,
@@ -449,6 +449,7 @@ class ExampleUnitTest {
             antiDump = true,
             dexIntegrityProtection = true,
             assistEncrypt = true,
+            deviceCertificate = true,
             dsProDexEncryption = true,
             stringEncryption = true,
             controlFlowObfuscation = true,
@@ -456,14 +457,16 @@ class ExampleUnitTest {
             disableDebuggable = true,
             stripDexDebug = true,
         )
-        assertEquals(7, allOn.activeCountFor(ProtectionSection.RUNTIME_GUARD))
+        assertEquals(8, allOn.activeCountFor(ProtectionSection.RUNTIME_GUARD))
         assertEquals(6, allOn.activeCountFor(ProtectionSection.BINARY_HARDENING))
-        assertEquals(13, allOn.activeToggleCount)
+        assertEquals(14, allOn.activeToggleCount)
         assertTrue(allOn.requiresRuntimeGuard)
         assertTrue(allOn.requiresGuardDex)
         assertTrue(allOn.requiresCoreDexContainer)
         assertFalse(ProtectionConfig(assistEncrypt = true).requiresRuntimeGuard)
         assertTrue(ProtectionConfig(assistEncrypt = true).requiresGuardDex)
+        assertTrue(ProtectionConfig(deviceCertificate = true).requiresRuntimeGuard)
+        assertTrue(ProtectionConfig(deviceCertificate = true).requiresGuardDex)
     }
 
     @Test
@@ -649,6 +652,7 @@ class ExampleUnitTest {
                 antiDump = true,
                 dexIntegrityProtection = true,
                 assistEncrypt = true,
+                deviceCertificate = true,
                 dsProDexEncryption = true,
                 stringEncryption = true,
                 controlFlowObfuscation = true,
@@ -719,8 +723,8 @@ class ExampleUnitTest {
                 assertFalse(rawText.contains("AndroidManifest.xml"))
 
                 val guardLines = decryptGuardPolicy(outZip, "com.demo.app")
-                // 1 + 16 + 32 + 64 + 256 + 512 = 881
-                assertEquals("881", guardLines[0])
+                // 1 + 16 + 32 + 64 + 256 + 512 + 1024 = 1905
+                assertEquals("1905", guardLines[0])
                 assertEquals("NONE", guardLines[1])
                 assertEquals("7", guardLines[2])
                 val dexCountLine = guardLines[3 + 7]
@@ -732,6 +736,9 @@ class ExampleUnitTest {
                 val (appName, factoryName) = AxmlManifestPatcher.inspectCoreForTest(patchedManifest)
                 assertEquals("com.dspro.core.DsProApplication", appName)
                 assertEquals(AxmlManifestPatcher.CORE_FACTORY_CLASS, factoryName)
+                val queries = AxmlManifestPatcher.inspectPlayQueriesForTest(patchedManifest)
+                assertTrue(queries.contains("com.android.vending"))
+                assertTrue(queries.contains("com.google.android.gms"))
             }
         } finally {
             tempDir.deleteRecursively()
@@ -775,6 +782,10 @@ class ExampleUnitTest {
         assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "blackdex"))
         assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "/proc/self/maps"))
         assertFalse(DexPatcher.containsAsciiMarker(guardBytes, ":DSPRO_GCFG_KEY:"))
+        assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "com.android.vending"))
+        assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "ro.boot.verifiedbootstate"))
+        assertFalse("Stop-the-world getAllStackTraces must not remain in core dex", DexPatcher.containsAsciiMarker(coreBytes, "getAllStackTraces"))
+        assertFalse("Stop-the-world getAllStackTraces must not remain in guard dex", DexPatcher.containsAsciiMarker(guardBytes, "getAllStackTraces"))
 
         val tempDir = Files.createTempDirectory("dspro_real_apk_core_test").toFile()
         try {
@@ -803,6 +814,7 @@ class ExampleUnitTest {
                 antiDump = true,
                 dexIntegrityProtection = true,
                 assistEncrypt = true,
+                deviceCertificate = true,
                 dsProDexEncryption = true,
                 stringEncryption = true,
                 controlFlowObfuscation = true,
@@ -1217,6 +1229,7 @@ class ExampleUnitTest {
                 ProtectionConfig(antiTampering = true) to "64",
                 ProtectionConfig(antiDump = true) to "256",
                 ProtectionConfig(dexIntegrityProtection = true) to "512",
+                ProtectionConfig(deviceCertificate = true) to "1024",
                 ProtectionConfig(assistEncrypt = true) to "0",
             )
 
@@ -1277,6 +1290,7 @@ class ExampleUnitTest {
             ProtectionConfig(antiTampering = true) to Pair(true, true),
             ProtectionConfig(antiDump = true) to Pair(true, true),
             ProtectionConfig(dexIntegrityProtection = true) to Pair(true, true),
+            ProtectionConfig(deviceCertificate = true) to Pair(true, true),
             ProtectionConfig(assistEncrypt = true) to Pair(false, true),
         )
         upperCases.forEach { (cfg, expected) ->
@@ -1498,6 +1512,42 @@ class ExampleUnitTest {
         } finally {
             tempDir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun `device certificate injects play store and gms queries without duplicates on repatch`() {
+        val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest(
+            packageName = "com.demo.cert",
+            debuggable = false,
+            allowBackup = false,
+        )
+        val first = AxmlManifestPatcher.patch(
+            rawManifest,
+            AxmlPatchOptions(
+                injectGuardProvider = true,
+                ensurePlayQueries = true,
+                packageName = "com.demo.cert",
+            ),
+        )
+        assertTrue(first.playQueriesInjected)
+        val q1 = AxmlManifestPatcher.inspectPlayQueriesForTest(first.manifestBytes)
+        assertEquals(setOf("com.android.vending", "com.google.android.gms"), q1)
+
+        val second = AxmlManifestPatcher.patch(
+            first.manifestBytes,
+            AxmlPatchOptions(
+                injectGuardProvider = true,
+                ensurePlayQueries = true,
+                protectionIdentifier = AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE,
+                packageName = "com.demo.cert",
+            ),
+        )
+        assertTrue(second.playQueriesInjected)
+        val q2 = AxmlManifestPatcher.inspectPlayQueriesForTest(second.manifestBytes)
+        assertEquals(setOf("com.android.vending", "com.google.android.gms"), q2)
+        val summary = AxmlManifestPatcher.inspectSecuritySummary(second.manifestBytes)
+        assertTrue(summary?.hasGuardProvider == true)
+        assertEquals("DS 专业版", summary?.protectionIdentifier)
     }
 }
 

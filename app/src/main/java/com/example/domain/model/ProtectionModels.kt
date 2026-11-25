@@ -21,6 +21,7 @@ data class ProtectionConfig(
     val antiDump: Boolean = false,
     val dexIntegrityProtection: Boolean = false,
     val assistEncrypt: Boolean = false,
+    val deviceCertificate: Boolean = false,
 
     // DS PRO Core & Binary Hardening (DEX/String/Resource encryption, CFO, AXML/DEX hardening)
     val dsProDexEncryption: Boolean = false,
@@ -36,7 +37,8 @@ data class ProtectionConfig(
             antiScreenshot ||
             antiTampering ||
             antiDump ||
-            dexIntegrityProtection
+            dexIntegrityProtection ||
+            deviceCertificate
 
     val requiresAssetVault: Boolean
         get() = resourceEncryption || assistEncrypt
@@ -56,6 +58,7 @@ data class ProtectionConfig(
             antiDump,
             dexIntegrityProtection,
             assistEncrypt,
+            deviceCertificate,
             dsProDexEncryption,
             stringEncryption,
             controlFlowObfuscation,
@@ -73,6 +76,7 @@ data class ProtectionConfig(
             antiDump,
             dexIntegrityProtection,
             assistEncrypt,
+            deviceCertificate,
         ).count { it }
 
         ProtectionSection.BINARY_HARDENING -> listOf(

@@ -42,6 +42,7 @@ data class ArchiveTransformStats(
     val dexDebugItemsCleared: Int,
     val integrityCount: Int,
     val dexIntegrityCount: Int,
+    val playQueriesInjected: Boolean = false,
     val protectionIdentifierEmbedded: Boolean = false,
     val inputSizeBytes: Long,
     val outputSizeBytes: Long,
@@ -171,6 +172,7 @@ class ApkProtectionProcessor(
                 if (stats.coreProtectionInjected) add("DS PRO ComponentFactory + Application")
                 if (stats.debuggableDisabled) add("debuggable=false")
                 if (stats.guardProviderInjected) add("<provider> DsProGuardProvider")
+                if (stats.playQueriesInjected) add("<queries> Play Store/GMS")
                 if (stats.protectionIdentifierEmbedded) add("Identifier: ${AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE}")
             }
             steps += ProtectionStepResult(
@@ -189,6 +191,7 @@ class ApkProtectionProcessor(
                 if (config.antiTampering) add("Tamper(${stats.integrityCount})")
                 if (config.antiDump) add("Anti-Dump")
                 if (config.dexIntegrityProtection) add("DEX-Integrity(${stats.dexIntegrityCount})")
+                if (config.deviceCertificate) add("Device-Cert")
             }
             steps += ProtectionStepResult(
                 id = "guard",
@@ -311,6 +314,7 @@ class ApkProtectionProcessor(
             var debuggableDisabled = false
             var guardProviderInjected = false
             var coreProtectionInjected = false
+            var playQueriesInjected = false
             var protectionIdentifierEmbedded = false
             var originalAppClass = ""
             var originalFactoryClass = ""
@@ -479,6 +483,7 @@ class ApkProtectionProcessor(
                                 disableDebuggable = config.disableDebuggable,
                                 injectGuardProvider = config.requiresGuardDex,
                                 enableCoreProtection = config.requiresCoreDexContainer,
+                                ensurePlayQueries = config.deviceCertificate,
                                 protectionIdentifier = if (shouldEmbedIdentifier) AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE else "",
                                 packageName = effectivePackageName,
                             ),
@@ -486,6 +491,7 @@ class ApkProtectionProcessor(
                         debuggableDisabled = patchResult.debuggableDisabled
                         guardProviderInjected = patchResult.guardProviderInjected
                         coreProtectionInjected = patchResult.coreProtectionInjected
+                        playQueriesInjected = patchResult.playQueriesInjected
                         protectionIdentifierEmbedded = patchResult.protectionIdentifierEmbedded
                         originalAppClass = patchResult.originalAppClass
                         originalFactoryClass = patchResult.originalFactoryClass
@@ -540,6 +546,10 @@ class ApkProtectionProcessor(
                             coreDexSha256 = coreDexSha256,
                             guardDexSha256 = guardDexSha256,
                             dexPayloads = sortedOriginalDex.map { it.second },
+                            onDexProgress = { done, total ->
+                                val pct = 72 + ((done * 12) / total.coerceAtLeast(1))
+                                onStageProgress?.invoke(pct, "Encrypting DEX $done/$total (AES-256-GCM)...")
+                            },
                         )
                         encryptedStringsCount = encStringsTotal
                         if (writeZipBytes(countingOut, zipOut, written, coreAssetName, coreContainerBytes, keepStored = true)) {
@@ -630,6 +640,7 @@ class ApkProtectionProcessor(
                 dexDebugItemsCleared = dexDebugItemsCleared,
                 integrityCount = integrityLines.size,
                 dexIntegrityCount = dexIntegrityLines.size,
+                playQueriesInjected = playQueriesInjected,
                 protectionIdentifierEmbedded = protectionIdentifierEmbedded,
                 inputSizeBytes = inputFile.length(),
                 outputSizeBytes = outputFile.length(),
@@ -703,7 +714,7 @@ class ApkProtectionProcessor(
                 allowBackup = null,
             )
             ZipOutputStream(innerCountingOut).use { innerZip ->
-                innerZip.setLevel(Deflater.BEST_COMPRESSION)
+                innerZip.setLevel(Deflater.DEFAULT_COMPRESSION)
                 writeZipBytes(innerCountingOut, innerZip, innerWritten, "AndroidManifest.xml", vaultManifest, keepStored = false)
                 for (asset in assetEntries) {
                     writeZipBytes(
@@ -748,6 +759,7 @@ class ApkProtectionProcessor(
             coreDexSha256: ByteArray,
             guardDexSha256: ByteArray,
             dexPayloads: List<ByteArray>,
+            onDexProgress: ((Int, Int) -> Unit)? = null,
         ): Pair<ByteArray, Int> {
             val aesKey = ByteArray(32).also { rng.nextBytes(it) }
             val salt = ByteArray(16).also { rng.nextBytes(it) }
@@ -853,7 +865,7 @@ class ApkProtectionProcessor(
                         payloadForCompression = rawDexBytes
                     }
 
-                    val compressedDex = deflateBytes(payloadForCompression, Deflater.BEST_COMPRESSION)
+                    val compressedDex = deflateBytes(payloadForCompression, Deflater.DEFAULT_COMPRESSION)
                     if (payloadForCompression !== rawDexBytes) {
                         payloadForCompression.fill(0)
                     }
@@ -869,6 +881,7 @@ class ApkProtectionProcessor(
                     }
                     dos.writeInt(cipherText.size)
                     dos.write(cipherText)
+                    onDexProgress?.invoke(idx + 1, dexPayloads.size)
                 }
                 aesKey.fill(0)
                 dos.flush()
@@ -909,6 +922,7 @@ class ApkProtectionProcessor(
             if (config.antiTampering) flags = flags or (1 shl 6)
             if (config.antiDump) flags = flags or (1 shl 8)
             if (config.dexIntegrityProtection) flags = flags or (1 shl 9)
+            if (config.deviceCertificate) flags = flags or (1 shl 10)
 
             val entries = if (config.antiTampering) integrityEntries else emptyList()
             val dexEntries = if (config.dexIntegrityProtection) dexIntegrityEntries else emptyList()

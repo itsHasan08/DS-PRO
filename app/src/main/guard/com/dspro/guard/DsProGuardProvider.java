@@ -1,10 +1,13 @@
 package com.dspro.guard;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Application;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
 import android.content.res.loader.ResourcesLoader;
@@ -18,8 +21,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.util.Log;
 import android.view.WindowManager;
+import android.widget.Toast;
 
 import dalvik.system.BaseDexClassLoader;
 import dalvik.system.InMemoryDexClassLoader;
@@ -30,6 +36,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -37,7 +44,12 @@ import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPairGenerator;
+import java.security.KeyStore;
 import java.security.MessageDigest;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
+import java.security.spec.ECGenParameterSpec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -59,8 +71,8 @@ import javax.crypto.spec.SecretKeySpec;
 /**
  * Runtime protection guard compiled into ds_pro_guard.dex and injected into protected APKs.
  * Reads encrypted binary security configuration from assets/dspro_guard.bin, wipes keys immediately,
- * dynamically mounts encrypted assets from assets/dspro_res.bin when present, enforces DEX Integrity
- * Protection & runtime security checks via flattened control-flow dispatch, and runs a burst watchdog.
+ * dynamically mounts encrypted assets from assets/dspro_res.bin when present, enforces DEX Integrity,
+ * Device Certificate & runtime security checks, and runs a low-overhead background watchdog.
  */
 public final class DsProGuardProvider extends ContentProvider {
 
@@ -72,11 +84,15 @@ public final class DsProGuardProvider extends ContentProvider {
     private static final int FLAG_ANTI_TAMPERING = 1 << 6;
     private static final int FLAG_ANTI_DUMP = 1 << 8;
     private static final int FLAG_DEX_INTEGRITY = 1 << 9;
+    private static final int FLAG_DEVICE_CERTIFICATE = 1 << 10;
 
     private static final String POLICY_ASSET = /*O*/"dspro_guard.bin"/*O*/;
     private static final String RESOURCE_VAULT_ASSET = /*O*/"assets/dspro_res.bin"/*O*/;
     private static final String CORE_LOADER_CLASS = "com.dspro.core.DsProCoreLoader";
     private static volatile boolean watchdogStarted = false;
+    private static volatile String pendingCertWarning = null;
+    private static volatile boolean certCrashScheduled = false;
+    private static volatile WeakReference<Activity> foregroundActivityRef = new WeakReference<>(null);
 
     private static volatile boolean resourcesMounted = false;
     private static volatile Object cachedResourcesLoader = null;
@@ -138,6 +154,7 @@ public final class DsProGuardProvider extends ContentProvider {
         final boolean antiDump = policy != null && policy.has(FLAG_ANTI_DUMP);
         final boolean antiTampering = policy != null && policy.has(FLAG_ANTI_TAMPERING);
         final boolean dexIntegrity = policy != null && policy.has(FLAG_DEX_INTEGRITY);
+        final boolean deviceCertificate = policy != null && policy.has(FLAG_DEVICE_CERTIFICATE);
 
         if (appCtx instanceof Application) {
             ((Application) appCtx).registerActivityLifecycleCallbacks(
@@ -153,6 +170,9 @@ public final class DsProGuardProvider extends ContentProvider {
                         if (antiScreenshot && activity.getWindow() != null) {
                             activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
                         }
+                        if (pendingCertWarning != null) {
+                            showCertWarningDialog(activity, pendingCertWarning);
+                        }
                     }
 
                     @Override
@@ -161,8 +181,12 @@ public final class DsProGuardProvider extends ContentProvider {
 
                     @Override
                     public void onActivityResumed(Activity activity) {
+                        foregroundActivityRef = new WeakReference<>(activity);
                         if (antiScreenshot && activity.getWindow() != null) {
                             activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                        }
+                        if (pendingCertWarning != null) {
+                            showCertWarningDialog(activity, pendingCertWarning);
                         }
                         if (detectDebugger && isDebuggerAttached()) {
                             crashWithReason(/*O*/"Debugger detected"/*O*/);
@@ -171,6 +195,9 @@ public final class DsProGuardProvider extends ContentProvider {
 
                     @Override
                     public void onActivityPaused(Activity activity) {
+                        if (foregroundActivityRef.get() == activity) {
+                            foregroundActivityRef = new WeakReference<>(null);
+                        }
                     }
 
                     @Override
@@ -188,7 +215,7 @@ public final class DsProGuardProvider extends ContentProvider {
             );
         }
 
-        if (policy != null && (antiDump || detectDebugger || antiTampering || dexIntegrity)) {
+        if (policy != null && (antiDump || detectDebugger || antiTampering || dexIntegrity || deviceCertificate)) {
             startLiveWatchdog(appCtx != null ? appCtx : context, policy);
         }
 
@@ -365,6 +392,7 @@ public final class DsProGuardProvider extends ContentProvider {
     }
 
     private static void enforceChecks(Context context, GuardPolicy policy) {
+        final boolean coreInitialized = isCoreInitialized(context);
         int state = 0x107;
         while (state != 0) {
             switch (state) {
@@ -375,7 +403,7 @@ public final class DsProGuardProvider extends ContentProvider {
                     state = 0x219;
                     break;
                 case 0x219:
-                    if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(context, true)) {
+                    if (policy.has(FLAG_ANTI_DUMP) && !coreInitialized && isMemoryDumpDetected(context, true)) {
                         crashWithReason(/*O*/"Memory / APK dumper detected"/*O*/);
                     }
                     state = 0x34A;
@@ -383,6 +411,15 @@ public final class DsProGuardProvider extends ContentProvider {
                 case 0x34A:
                     if (policy.has(FLAG_DETECT_ROOT) && isDeviceRooted()) {
                         crashWithReason(/*O*/"Root detected"/*O*/);
+                    }
+                    state = 0x3E8;
+                    break;
+                case 0x3E8:
+                    if (policy.has(FLAG_DEVICE_CERTIFICATE)) {
+                        String certFailure = checkDeviceCertificateFailure(context, false);
+                        if (certFailure != null) {
+                            warnAndScheduleCrash(context, certFailure);
+                        }
                     }
                     state = 0x47C;
                     break;
@@ -393,7 +430,7 @@ public final class DsProGuardProvider extends ContentProvider {
                     state = 0x591;
                     break;
                 case 0x591:
-                    if (policy.has(FLAG_ANTI_TAMPERING) && !verifyCriticalApkIntegrity(context, policy.integrityEntries)) {
+                    if (policy.has(FLAG_ANTI_TAMPERING) && !verifyCriticalApkIntegrity(context, policy.integrityEntries, coreInitialized)) {
                         crashWithReason(/*O*/"APK tampering detected"/*O*/);
                     }
                     state = 0;
@@ -415,32 +452,47 @@ public final class DsProGuardProvider extends ContentProvider {
             @Override
             public void run() {
                 int cycle = 0;
+                boolean attestedOnce = false;
                 while (true) {
                     if (cycle > 0) {
                         try {
-                            long sleepMs = (cycle < 20) ? 150L : 600L;
+                            long sleepMs = (cycle < 5) ? 600L : 3000L;
                             Thread.sleep(sleepMs);
                         } catch (InterruptedException ignored) {
                             return;
                         }
                     }
                     try {
-                        boolean deepScan = (cycle % 4 == 0);
+                        if (policy.has(FLAG_DEVICE_CERTIFICATE)) {
+                            boolean runAttestation = !attestedOnce;
+                            attestedOnce = true;
+                            if (runAttestation || (cycle % 10 == 0)) {
+                                String certFailure = checkDeviceCertificateFailure(appContext, runAttestation);
+                                if (certFailure != null) {
+                                    warnAndScheduleCrash(appContext, certFailure);
+                                    return;
+                                }
+                            }
+                        }
                         if (policy.has(FLAG_DETECT_DEBUGGER) && isDebuggerAttached()) {
                             triggerMainCrash(mainHandler, /*O*/"Debugger attached at runtime"/*O*/);
                             return;
                         }
-                        if (policy.has(FLAG_ANTI_DUMP) && isMemoryDumpDetected(appContext, deepScan)) {
-                            triggerMainCrash(mainHandler, /*O*/"Runtime memory / DEX dump blocked"/*O*/);
-                            return;
+                        boolean coreMonActive = isCoreWatchdogRunning(appContext);
+                        if (policy.has(FLAG_ANTI_DUMP) && !coreMonActive) {
+                            boolean deepScan = (cycle % 6 == 0);
+                            if (isMemoryDumpDetected(appContext, deepScan)) {
+                                triggerMainCrash(mainHandler, /*O*/"Runtime memory / DEX dump blocked"/*O*/);
+                                return;
+                            }
                         }
-                        if (policy.has(FLAG_DEX_INTEGRITY) && (cycle % 16 == 0)) {
+                        if (policy.has(FLAG_DEX_INTEGRITY) && (cycle % 10 == 0)) {
                             if (!verifyDexIntegrity(appContext, policy.dexIntegrityEntries)) {
                                 triggerMainCrash(mainHandler, /*O*/"DEX integrity violation detected"/*O*/);
                                 return;
                             }
                         }
-                        if (policy.has(FLAG_ANTI_TAMPERING) && (cycle % 24 == 0)) {
+                        if (policy.has(FLAG_ANTI_TAMPERING) && (cycle % 10 == 0)) {
                             if (!verifyApkIntegrity(appContext, policy.integrityEntries)) {
                                 triggerMainCrash(mainHandler, /*O*/"APK tampering detected"/*O*/);
                                 return;
@@ -455,8 +507,92 @@ public final class DsProGuardProvider extends ContentProvider {
                 }
             }
         }, /*O*/"dspro-guard-mon"/*O*/);
+        t.setPriority(Thread.MIN_PRIORITY);
         t.setDaemon(true);
         t.start();
+    }
+
+    private static boolean isCoreInitialized(Context context) {
+        if (context == null) {
+            return false;
+        }
+        try {
+            Class<?> coreCls = Class.forName(CORE_LOADER_CLASS, false, context.getClassLoader());
+            Method m = coreCls.getDeclaredMethod("isInitialized");
+            m.setAccessible(true);
+            return Boolean.TRUE.equals(m.invoke(null));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isCoreWatchdogRunning(Context context) {
+        if (context == null) {
+            return false;
+        }
+        try {
+            Class<?> coreCls = Class.forName(CORE_LOADER_CLASS, false, context.getClassLoader());
+            Method m = coreCls.getDeclaredMethod("isCoreWatchdogStarted");
+            m.setAccessible(true);
+            return Boolean.TRUE.equals(m.invoke(null));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static synchronized void warnAndScheduleCrash(final Context context, final String reason) {
+        final String fullMsg = reason.startsWith(/*O*/"DS PRO Protection:"/*O*/)
+            ? reason
+            : /*O*/"DS PRO Protection: "/*O*/ + reason;
+        pendingCertWarning = fullMsg;
+        if (certCrashScheduled) {
+            return;
+        }
+        certCrashScheduled = true;
+        Log.e(TAG, fullMsg);
+        final Context appOrCtx = (context != null && context.getApplicationContext() != null)
+            ? context.getApplicationContext()
+            : context;
+        final Handler mainHandler = new Handler(Looper.getMainLooper());
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (appOrCtx != null) {
+                        Toast.makeText(appOrCtx, fullMsg, Toast.LENGTH_LONG).show();
+                    }
+                } catch (Throwable ignored) {
+                }
+                Activity act = foregroundActivityRef.get();
+                if (act != null && !act.isFinishing() && !act.isDestroyed()) {
+                    showCertWarningDialog(act, fullMsg);
+                }
+            }
+        });
+        mainHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    throw new SecurityException(fullMsg);
+                } finally {
+                    Process.killProcess(Process.myPid());
+                }
+            }
+        }, 1800L);
+    }
+
+    private static void showCertWarningDialog(final Activity activity, final String message) {
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+            return;
+        }
+        try {
+            new AlertDialog.Builder(activity)
+                .setTitle(/*O*/"Device Certificate Warning"/*O*/)
+                .setMessage(message)
+                .setCancelable(false)
+                .show();
+        } catch (Throwable ignored) {
+        }
     }
 
     private static void triggerMainCrash(Handler mainHandler, final String reason) {
@@ -611,7 +747,7 @@ public final class DsProGuardProvider extends ContentProvider {
                 byte[] dexBytes;
                 try (InputStream in = apkZip.getInputStream(entry)) {
                     ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(1024, expectedSize));
-                    byte[] buf = new byte[16384];
+                    byte[] buf = new byte[32768];
                     int n;
                     while ((n = in.read(buf)) != -1) {
                         out.write(buf, 0, n);
@@ -690,22 +826,16 @@ public final class DsProGuardProvider extends ContentProvider {
     }
 
     private static boolean isMemoryDumpDetected(Context context, boolean deepScan) {
-        if (isDebuggerAttached() || hasHookedSystemMethods() || hasSuspiciousOpenFds()) {
-            return true;
-        }
-        if (hasSuspiciousThreadNames(
-            /*O*/"gum-js-loop"/*O*/,
-            /*O*/"pool-frida"/*O*/,
-            /*O*/"linjector"/*O*/,
-            /*O*/"blackdex"/*O*/,
-            /*O*/"fupk3"/*O*/,
-            /*O*/"dumpdex"/*O*/
-        )) {
+        if (isDebuggerAttached() || hasSuspiciousJavaThreadNames()) {
             return true;
         }
         if (!deepScan) {
             return false;
         }
+        if (hasHookedSystemMethods() || hasSuspiciousProcThreadNames() || hasSuspiciousOpenFds()) {
+            return true;
+        }
+        boolean checkPkgInMaps = false;
         if (context != null) {
             String apkPath = safeLower(context.getPackageCodePath());
             if (apkPath.contains(/*O*/"/data/data/"/*O*/)
@@ -752,9 +882,7 @@ public final class DsProGuardProvider extends ContentProvider {
                     }
                     String pkg = context.getPackageName();
                     if (pkg != null && !pkg.isEmpty() && !cmdline.startsWith(pkg)) {
-                        if (!mapsContainsPackageApk(pkg)) {
-                            return true;
-                        }
+                        checkPkgInMaps = true;
                     }
                 }
             }
@@ -762,7 +890,7 @@ public final class DsProGuardProvider extends ContentProvider {
         if (hasHookedInstrumentation()) {
             return true;
         }
-        if (hasDumperInMaps()) {
+        if (scanProcMaps(context != null ? context.getPackageName() : null, checkPkgInMaps)) {
             return true;
         }
         if (containsFridaListeningPort(/*O*/"/proc/net/tcp"/*O*/)
@@ -770,36 +898,34 @@ public final class DsProGuardProvider extends ContentProvider {
             || containsInFile(/*O*/"/proc/net/unix"/*O*/, /*O*/"frida"/*O*/, /*O*/"linjector"/*O*/, /*O*/"hluda"/*O*/, /*O*/"florida"/*O*/, /*O*/"blackdex"/*O*/)) {
             return true;
         }
-        try {
-            Map<Thread, StackTraceElement[]> all = Thread.getAllStackTraces();
-            for (StackTraceElement[] frames : all.values()) {
-                if (hasDumperFrames(frames)) {
-                    return true;
-                }
-            }
-        } catch (Throwable ignored) {
-        }
         return false;
     }
 
-    private static boolean hasDumperFrames(StackTraceElement[] frames) {
-        if (frames == null) return false;
-        for (StackTraceElement el : frames) {
-            String cls = safeLower(el.getClassName());
-            if (cls.contains(/*O*/"blackdex"/*O*/)
-                || cls.contains(/*O*/"blackbox"/*O*/)
-                || cls.contains(/*O*/"dumpdex"/*O*/)
-                || cls.contains(/*O*/"fupk"/*O*/)
-                || cls.contains(/*O*/"libfart"/*O*/)
-                || cls.contains(/*O*/"fart_art"/*O*/)
-                || cls.contains(/*O*/"cn.mik.fart"/*O*/)
-                || cls.contains(/*O*/"youpk"/*O*/)
-                || cls.contains(/*O*/"dexdump"/*O*/)
-                || cls.contains(/*O*/"top.niunaijun"/*O*/)
-                || cls.contains(/*O*/"com.lody"/*O*/)
-                || cls.contains(/*O*/"frida"/*O*/)) {
-                return true;
+    private static boolean hasSuspiciousJavaThreadNames() {
+        try {
+            ThreadGroup root = Thread.currentThread().getThreadGroup();
+            while (root != null && root.getParent() != null) {
+                root = root.getParent();
             }
+            if (root != null) {
+                int count = root.activeCount();
+                Thread[] list = new Thread[count + 16];
+                int n = root.enumerate(list, true);
+                for (int i = 0; i < n; i++) {
+                    Thread th = list[i];
+                    if (th == null) continue;
+                    String lower = safeLower(th.getName());
+                    if (lower.contains(/*O*/"gum-js-loop"/*O*/)
+                        || lower.contains(/*O*/"pool-frida"/*O*/)
+                        || lower.contains(/*O*/"linjector"/*O*/)
+                        || lower.contains(/*O*/"blackdex"/*O*/)
+                        || lower.contains(/*O*/"fupk3"/*O*/)
+                        || lower.contains(/*O*/"dumpdex"/*O*/)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
         }
         return false;
     }
@@ -815,21 +941,6 @@ public final class DsProGuardProvider extends ContentProvider {
         } catch (Throwable ignored) {
             return "";
         }
-    }
-
-    private static boolean mapsContainsPackageApk(String packageName) {
-        String lowerPkg = packageName.toLowerCase(Locale.US);
-        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String lower = line.toLowerCase(Locale.US);
-                if (lower.contains(lowerPkg) && lower.contains(".apk")) {
-                    return true;
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return false;
     }
 
     private static boolean hasHookedInstrumentation() {
@@ -861,11 +972,16 @@ public final class DsProGuardProvider extends ContentProvider {
         return false;
     }
 
-    private static boolean hasDumperInMaps() {
-        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/))) {
+    private static boolean scanProcMaps(String packageName, boolean requirePkgApk) {
+        String lowerPkg = (requirePkgApk && packageName != null) ? packageName.toLowerCase(Locale.US) : null;
+        boolean foundPkgApk = !requirePkgApk;
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/self/maps"/*O*/), 16384)) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String lower = line.toLowerCase(Locale.US);
+                if (!foundPkgApk && lowerPkg != null && lower.contains(lowerPkg) && lower.contains(".apk")) {
+                    foundPkgApk = true;
+                }
                 if (lower.contains(/*O*/"blackdex"/*O*/)
                     || lower.contains(/*O*/"blackbox"/*O*/)
                     || lower.contains(/*O*/"libnmmvm"/*O*/)
@@ -901,8 +1017,9 @@ public final class DsProGuardProvider extends ContentProvider {
                 }
             }
         } catch (Throwable ignored) {
+            return false;
         }
-        return false;
+        return requirePkgApk && !foundPkgApk;
     }
 
     private static boolean hasHookedSystemMethods() {
@@ -971,7 +1088,7 @@ public final class DsProGuardProvider extends ContentProvider {
         return false;
     }
 
-    private static boolean hasSuspiciousThreadNames(String... needles) {
+    private static boolean hasSuspiciousProcThreadNames() {
         try {
             File taskDir = new File(/*O*/"/proc/self/task"/*O*/);
             File[] tasks = taskDir.listFiles();
@@ -985,10 +1102,13 @@ public final class DsProGuardProvider extends ContentProvider {
                     String line = br.readLine();
                     if (line != null) {
                         String lower = line.trim().toLowerCase(Locale.US);
-                        for (String needle : needles) {
-                            if (lower.contains(needle)) {
-                                return true;
-                            }
+                        if (lower.contains(/*O*/"gum-js-loop"/*O*/)
+                            || lower.contains(/*O*/"pool-frida"/*O*/)
+                            || lower.contains(/*O*/"linjector"/*O*/)
+                            || lower.contains(/*O*/"blackdex"/*O*/)
+                            || lower.contains(/*O*/"fupk3"/*O*/)
+                            || lower.contains(/*O*/"dumpdex"/*O*/)) {
+                            return true;
                         }
                     }
                 } catch (Throwable ignored) {
@@ -1055,7 +1175,259 @@ public final class DsProGuardProvider extends ContentProvider {
         return false;
     }
 
-    private static boolean verifyCriticalApkIntegrity(Context context, List<String> entries) {
+    private static String checkDeviceCertificateFailure(Context context, boolean includeAttestation) {
+        if (context == null || Process.isIsolated()) {
+            return null;
+        }
+        try {
+            PackageManager pm = context.getPackageManager();
+            if (pm != null) {
+                String playErr = checkCertifiedSystemPackage(pm, /*O*/"com.android.vending"/*O*/, /*O*/"Google Play Store"/*O*/);
+                if (playErr != null) {
+                    return playErr;
+                }
+                String gmsErr = checkCertifiedSystemPackage(pm, /*O*/"com.google.android.gms"/*O*/, /*O*/"Google Play Services"/*O*/);
+                if (gmsErr != null) {
+                    return gmsErr;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        String tags = Build.TAGS;
+        if (tags != null && tags.contains(/*O*/"test-keys"/*O*/)) {
+            return /*O*/"Device certificate missing: unsigned test-keys ROM"/*O*/;
+        }
+
+        String bootState = readSystemProperty(/*O*/"ro.boot.verifiedbootstate"/*O*/).toLowerCase(Locale.US);
+        if (/*O*/"orange"/*O*/.equals(bootState) || /*O*/"yellow"/*O*/.equals(bootState) || /*O*/"red"/*O*/.equals(bootState)) {
+            return /*O*/"Device certificate failed: Verified Boot unlocked"/*O*/;
+        }
+        String flashLocked = readSystemProperty(/*O*/"ro.boot.flash.locked"/*O*/);
+        if ("0".equals(flashLocked)) {
+            return /*O*/"Device certificate failed: Bootloader unlocked"/*O*/;
+        }
+        String vbmetaState = readSystemProperty(/*O*/"ro.boot.vbmeta.device_state"/*O*/).toLowerCase(Locale.US);
+        if (/*O*/"unlocked"/*O*/.equals(vbmetaState)) {
+            return /*O*/"Device certificate failed: vbmeta device unlocked"/*O*/;
+        }
+
+        if (includeAttestation) {
+            String attestErr = checkHardwareRootOfTrust();
+            if (attestErr != null) {
+                return attestErr;
+            }
+        }
+        return null;
+    }
+
+    private static String checkCertifiedSystemPackage(PackageManager pm, String pkg, String label) {
+        ApplicationInfo info;
+        try {
+            info = pm.getApplicationInfo(pkg, PackageManager.MATCH_DISABLED_COMPONENTS);
+        } catch (PackageManager.NameNotFoundException nnf) {
+            return /*O*/"Device certificate missing: "/*O*/ + label + /*O*/" not installed"/*O*/;
+        } catch (Throwable ignored) {
+            return null;
+        }
+        if (info == null) {
+            return /*O*/"Device certificate missing: "/*O*/ + label + /*O*/" unavailable"/*O*/;
+        }
+        try {
+            int state = pm.getApplicationEnabledSetting(pkg);
+            if (!info.enabled
+                || state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                || state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+                || state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
+                return /*O*/"Device certificate invalid: "/*O*/ + label + /*O*/" is disabled"/*O*/;
+            }
+        } catch (Throwable ignored) {
+        }
+        int sysMask = ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP;
+        if ((info.flags & sysMask) == 0) {
+            return /*O*/"Device certificate unverified: unofficial "/*O*/ + label;
+        }
+        return null;
+    }
+
+    private static String readSystemProperty(String key) {
+        try {
+            Class<?> sp = Class.forName(/*O*/"android.os.SystemProperties"/*O*/);
+            Method get = sp.getMethod("get", String.class, String.class);
+            Object val = get.invoke(null, key, "");
+            return val != null ? val.toString().trim() : "";
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static String checkHardwareRootOfTrust() {
+        final String alias = /*O*/"dspro_cert_probe"/*O*/;
+        KeyStore ks = null;
+        try {
+            ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            if (ks.containsAlias(alias)) {
+                ks.deleteEntry(alias);
+            }
+            byte[] challenge = /*O*/"dspro-device-cert"/*O*/.getBytes(StandardCharsets.UTF_8);
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore");
+            KeyGenParameterSpec.Builder builder = new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
+                .setAlgorithmParameterSpec(new ECGenParameterSpec("secp256r1"))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .setAttestationChallenge(challenge);
+            kpg.initialize(builder.build());
+            kpg.generateKeyPair();
+
+            Certificate[] chain = ks.getCertificateChain(alias);
+            if (chain == null || chain.length < 2 || !(chain[0] instanceof X509Certificate)) {
+                return null;
+            }
+            byte[] ext = ((X509Certificate) chain[0]).getExtensionValue("1.3.6.1.4.1.11129.2.1.17");
+            if (ext == null || ext.length < 16) {
+                return null;
+            }
+            return parseAttestationRootOfTrust(ext);
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            if (ks != null) {
+                try {
+                    ks.deleteEntry(alias);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    private static String parseAttestationRootOfTrust(byte[] derExt) {
+        try {
+            int[] pos = new int[] { 0 };
+            if ((derExt[0] & 0xFF) == 0x04) {
+                readDerLength(derExt, pos);
+            }
+            if (pos[0] >= derExt.length || (derExt[pos[0]] & 0xFF) != 0x30) {
+                return null;
+            }
+            int seqLen = readDerLength(derExt, pos);
+            int seqEnd = Math.min(derExt.length, pos[0] + seqLen);
+
+            // KeyDescription fields:
+            // [0] attestationVersion, [1] attestationSecurityLevel, [2] keymasterVersion,
+            // [3] keymasterSecurityLevel, [4] attestationChallenge, [5] uniqueId,
+            // [6] softwareEnforced, [7] teeEnforced
+            long attestationSecLevel = -1;
+            int teeStart = -1;
+            int teeEnd = -1;
+            for (int field = 0; field < 8 && pos[0] < seqEnd; field++) {
+                int tag = derExt[pos[0]] & 0xFF;
+                int fLen = readDerLength(derExt, pos);
+                int fStart = pos[0];
+                int fEnd = Math.min(seqEnd, fStart + fLen);
+                if (field == 1 && (tag == 0x0A || tag == 0x02) && fLen > 0 && fLen <= 4) {
+                    long val = 0;
+                    for (int k = fStart; k < fEnd; k++) {
+                        val = (val << 8) | (derExt[k] & 0xFF);
+                    }
+                    attestationSecLevel = val;
+                } else if (field == 7 && tag == 0x30) {
+                    teeStart = fStart;
+                    teeEnd = fEnd;
+                }
+                pos[0] = fEnd;
+            }
+
+            // Skip if not TEE/StrongBox hardware attested
+            if (attestationSecLevel < 1 || teeStart < 0) {
+                return null;
+            }
+
+            pos[0] = teeStart;
+            while (pos[0] < teeEnd) {
+                int tagStart = pos[0];
+                int ctxTagNum = readDerTagNumber(derExt, pos);
+                int tagLen = readDerLengthSilent(derExt, pos);
+                int valStart = pos[0];
+                int valEnd = Math.min(teeEnd, valStart + tagLen);
+                if (ctxTagNum == 704 && valStart < valEnd && (derExt[valStart] & 0xFF) == 0x30) {
+                    int[] rPos = new int[] { valStart };
+                    int rotLen = readDerLength(derExt, rPos);
+                    int rotEnd = Math.min(valEnd, rPos[0] + rotLen);
+                    Boolean deviceLocked = null;
+                    Integer verifiedBootState = null;
+                    for (int rField = 0; rField < 3 && rPos[0] < rotEnd; rField++) {
+                        int rTag = derExt[rPos[0]] & 0xFF;
+                        int rLen = readDerLength(derExt, rPos);
+                        int rfStart = rPos[0];
+                        int rfEnd = Math.min(rotEnd, rfStart + rLen);
+                        if (rField == 1 && rTag == 0x01 && rLen >= 1) {
+                            deviceLocked = (derExt[rfStart] != 0);
+                        } else if (rField == 2 && (rTag == 0x0A || rTag == 0x02) && rLen >= 1 && rLen <= 4) {
+                            int v = 0;
+                            for (int k = rfStart; k < rfEnd; k++) {
+                                v = (v << 8) | (derExt[k] & 0xFF);
+                            }
+                            verifiedBootState = v;
+                        }
+                        rPos[0] = rfEnd;
+                    }
+                    if (Boolean.FALSE.equals(deviceLocked) || (verifiedBootState != null && verifiedBootState > 1)) {
+                        return /*O*/"Device certificate failed: hardware attestation unverified"/*O*/;
+                    }
+                    return null;
+                }
+                if (valEnd <= tagStart) {
+                    break;
+                }
+                pos[0] = valEnd;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static int readDerTagNumber(byte[] data, int[] pos) {
+        int b = data[pos[0]++] & 0xFF;
+        int tagNum = b & 0x1F;
+        if (tagNum == 0x1F) {
+            tagNum = 0;
+            while (pos[0] < data.length) {
+                int next = data[pos[0]++] & 0xFF;
+                tagNum = (tagNum << 7) | (next & 0x7F);
+                if ((next & 0x80) == 0) {
+                    break;
+                }
+            }
+        }
+        return tagNum;
+    }
+
+    private static int readDerLengthSilent(byte[] data, int[] pos) {
+        if (pos[0] >= data.length) {
+            return 0;
+        }
+        int b = data[pos[0]++] & 0xFF;
+        if ((b & 0x80) == 0) {
+            return b;
+        }
+        int numBytes = b & 0x7F;
+        int len = 0;
+        for (int i = 0; i < numBytes && pos[0] < data.length; i++) {
+            len = (len << 8) | (data[pos[0]++] & 0xFF);
+        }
+        return len;
+    }
+
+    private static int readDerLength(byte[] data, int[] pos) {
+        pos[0]++;
+        return readDerLengthSilent(data, pos);
+    }
+
+    private static boolean verifyCriticalApkIntegrity(
+        Context context,
+        List<String> entries,
+        boolean coreAlreadyAuthenticated
+    ) {
         if (entries == null || entries.isEmpty()) {
             return false;
         }
@@ -1072,9 +1444,13 @@ public final class DsProGuardProvider extends ContentProvider {
                 if (entry == null) {
                     return false;
                 }
-                boolean isCriticalFast = "AndroidManifest.xml".equals(entryName)
-                    || entryName.endsWith(".dex")
-                    || entryName.startsWith("assets/dspro_");
+                boolean skipAlreadyAuthenticatedBin =
+                    (coreAlreadyAuthenticated && "assets/dspro_core.bin".equals(entryName))
+                        || (resourcesMounted && RESOURCE_VAULT_ASSET.equals(entryName));
+                boolean isCriticalFast = !skipAlreadyAuthenticatedBin
+                    && ("AndroidManifest.xml".equals(entryName)
+                        || entryName.endsWith(".dex")
+                        || entryName.startsWith("assets/dspro_"));
                 if (isCriticalFast) {
                     String actualHex = sha256Entry(apkZip, entry);
                     if (!expectedHex.equals(actualHex)) {
@@ -1121,7 +1497,7 @@ public final class DsProGuardProvider extends ContentProvider {
     private static String sha256Entry(ZipFile zip, ZipEntry entry) throws Exception {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         try (InputStream in = zip.getInputStream(entry)) {
-            byte[] buf = new byte[16 * 1024];
+            byte[] buf = new byte[32 * 1024];
             int n;
             while ((n = in.read(buf)) != -1) {
                 md.update(buf, 0, n);
