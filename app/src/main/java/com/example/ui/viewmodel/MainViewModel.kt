@@ -116,8 +116,8 @@ class MainViewModel(
             _uiState.update { it.copy(isRefreshing = true) }
             protectionProcessor.clearWorkCache()
             val elapsed = System.currentTimeMillis() - startedAt
-            if (elapsed < 60L) {
-                delay(60L - elapsed)
+            if (elapsed < 340L) {
+                delay(340L - elapsed)
             }
             _uiState.value = DsProUiState(
                 isRefreshing = false,

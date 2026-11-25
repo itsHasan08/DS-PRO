@@ -58,7 +58,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -147,8 +148,8 @@ fun MainScreen(
     val runtimeToggles = remember(cfg, viewModel) { runtimeGuardToggles(cfg, viewModel) }
     val binaryToggles = remember(cfg, viewModel) { binaryHardeningToggles(cfg, viewModel) }
     val refreshAlpha by animateFloatAsState(
-        targetValue = if (uiState.isRefreshing) 0.68f else 1f,
-        animationSpec = tween(durationMillis = 220),
+        targetValue = if (uiState.isRefreshing) 0.78f else 1f,
+        animationSpec = tween(durationMillis = 260),
         label = "refresh_alpha",
     )
 
@@ -201,10 +202,15 @@ fun MainScreen(
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
+                val density = LocalDensity.current
+                val maxPullShiftPx = remember(density) { with(density) { 28.dp.toPx() } }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .alpha(refreshAlpha),
+                        .graphicsLayer {
+                            alpha = refreshAlpha
+                            translationY = pullToRefreshState.distanceFraction.coerceIn(0f, 1.2f) * maxPullShiftPx
+                        },
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     LazyVerticalGrid(
