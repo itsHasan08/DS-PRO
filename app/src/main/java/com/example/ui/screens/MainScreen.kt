@@ -68,6 +68,7 @@ import com.example.domain.model.ProtectionConfig
 import com.example.domain.model.ProtectionFeatureInfo
 import com.example.domain.model.ProtectionSection
 import com.example.ui.components.CenteredToastHost
+import com.example.ui.components.DeveloperInfoDialog
 import com.example.ui.components.DsProTopBar
 import com.example.ui.components.FeatureInfoDialog
 import com.example.ui.components.GridGroupHeader
@@ -107,6 +108,7 @@ fun MainScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var activeInfoDialog by remember { mutableStateOf<Pair<ProtectionFeatureInfo, Boolean>?>(null) }
+    var showDeveloperInfo by remember { mutableStateOf(false) }
     val pullToRefreshState = rememberPullToRefreshState()
     val gridState = rememberLazyGridState()
 
@@ -165,6 +167,10 @@ fun MainScreen(
         )
     }
 
+    if (showDeveloperInfo) {
+        DeveloperInfoDialog(onDismiss = { showDeveloperInfo = false })
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             modifier = Modifier
@@ -173,7 +179,7 @@ fun MainScreen(
             containerColor = PureWhite,
             contentWindowInsets = WindowInsets.navigationBars,
             topBar = {
-                DsProTopBar(activeCount = cfg.activeToggleCount)
+                DsProTopBar(onInfoClick = { showDeveloperInfo = true })
             },
         ) { innerPadding ->
             PullToRefreshBox(
@@ -205,7 +211,7 @@ fun MainScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .widthIn(max = 840.dp),
-                        contentPadding = PaddingValues(16.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
@@ -425,7 +431,7 @@ fun MainScreen(
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = if (uiState.isProcessing) "Processing (${uiState.progress}%)..." else "Start",
+                                    text = if (uiState.isProcessing) "Encrypting (${uiState.progress}%)..." else "Start Encrypt",
                                     fontWeight = FontWeight.SemiBold,
                                 )
                             }
@@ -461,110 +467,180 @@ fun MainScreen(
 private val INFO_DETECT_ROOT = ProtectionFeatureInfo(
     id = "detect_root",
     title = "Detect Root",
-    whatTurnsOn = "Activates Root Environment Guard inside encrypted assets/dspro_guard.bin and injects DsProGuardProvider.",
-    howItWorks = "Scans for su binaries, Magisk/KernelSU/APatch mounts, and test-keys ROM builds before the app starts. If root is detected, the app immediately crashes with 'Root detected'.",
+    fullName = "Root Environment Detection",
+    summary = "Stops your app from running on rooted phones.",
+    protections = listOf(
+        "Blocks devices with root access or root-hiding apps",
+        "Blocks uncertified test-keys custom ROM environments",
+        "Shows a warning and closes the app immediately on rooted phones",
+    ),
 )
 
 private val INFO_DETECT_DEBUGGER = ProtectionFeatureInfo(
     id = "detect_debugger",
-    title = "Detect Debugger",
-    whatTurnsOn = "Activates Active Debugger & TracerPid Guard at startup, resume, and in the live watchdog.",
-    howItWorks = "Checks Debug.isDebuggerConnected() and /proc/self/status TracerPid for attached JDWP or native ptrace debuggers. Crashes immediately when attached.",
+    title = "Anti Debug",
+    fullName = "Active Debugger Detection",
+    summary = "Blocks outsiders from attaching debugging tools to your running app.",
+    protections = listOf(
+        "Stops live debuggers from inspecting or controlling your app",
+        "Keeps checking both at startup and while the app runs",
+        "Closes the app immediately if any debugger is attached",
+    ),
+)
+
+private val INFO_DEVICE_CERTIFICATE = ProtectionFeatureInfo(
+    id = "device_certificate",
+    title = "Device Cert",
+    fullName = "Device Certificate & Play Integrity Check",
+    summary = "Checks that Google Play Store is active and the device is properly certified.",
+    protections = listOf(
+        "Blocks rooted phones where Play Store or Play Services are disabled",
+        "Detects unlocked bootloaders and uncertified modified devices",
+        "Displays a warning popup before closing the app",
+    ),
 )
 
 private val INFO_ANTI_SCREENSHOT = ProtectionFeatureInfo(
     id = "anti_screenshot",
-    title = "Anti Screenshot",
-    whatTurnsOn = "Registers an Activity lifecycle guard that applies WindowManager.LayoutParams.FLAG_SECURE.",
-    howItWorks = "Automatically prevents screenshots, screen recording, and recent-apps preview thumbnails on every screen of the protected application.",
+    title = "Screen Guard",
+    fullName = "Anti-Screenshot & Screen Recording Block",
+    summary = "Stops anyone from capturing or recording your app's screens.",
+    protections = listOf(
+        "Blocks screenshots across every screen inside the app",
+        "Turns screen recordings and screen casting completely black",
+        "Hides sensitive app previews in the Recent Apps list",
+    ),
 )
 
 private val INFO_ANTI_TAMPERING = ProtectionFeatureInfo(
     id = "anti_tampering",
-    title = "Anti Tampering",
-    whatTurnsOn = "Records SHA-256 digests of AndroidManifest.xml, resources.arsc, DEX, .so libs, and protected assets inside encrypted assets/dspro_guard.bin.",
-    howItWorks = "Verifies every tracked file inside the installed APK at startup and periodically via watchdog. If any file is altered or replaced, the app crashes with 'APK tampering detected'.",
+    title = "Anti Tamper",
+    fullName = "Anti-Tampering & APK Modification Guard",
+    summary = "Prevents your app from being edited, hacked, or turned into a mod APK.",
+    protections = listOf(
+        "Detects any change to app code, layouts, or internal files",
+        "Blocks repacked, patched, or re-signed mod APKs from opening",
+        "Verifies app integrity at startup and during use",
+    ),
 )
 
 private val INFO_ANTI_DUMP = ProtectionFeatureInfo(
     id = "anti_dump",
     title = "Anti Dump",
-    whatTurnsOn = "Activates low-overhead continuous Anti-Dump Watchdog across DsProCoreLoader and DsProGuardProvider.",
-    howItWorks = "Blocks BlackDex/BlackBox/VirtualApp sandboxes (/proc/self/cmdline & maps), Frida/hluda/florida, ART hooks on Cipher/ClassLoader/InMemoryDexClassLoader, and open .dex dump file descriptors in real time.",
+    fullName = "Anti-Dump & Memory Hook Blocker",
+    summary = "Blocks memory dumpers, app cloners, and runtime hooking tools.",
+    protections = listOf(
+        "Stops tools from copying your app's code out of phone memory",
+        "Blocks virtual app cloners and sandbox environments",
+        "Detects and stops live hooking frameworks in real time",
+    ),
 )
 
 private val INFO_DEX_INTEGRITY = ProtectionFeatureInfo(
     id = "dex_integrity",
-    title = "DEX Integrity Protection",
-    whatTurnsOn = "Embeds per-DEX SHA-256 digests, Adler32 checksums, SHA-1 signatures, and decrypted payload hashes into encrypted dspro_guard.bin and dspro_core.bin.",
-    howItWorks = "Validates every classes*.dex entry in the APK plus every in-memory decrypted DEX buffer at launch and continuously in the watchdog. Blocks injected or patched DEX files.",
-)
-
-private val INFO_DSPRO_ENCRYPT = ProtectionFeatureInfo(
-    id = "dspro_dex_encryption",
-    title = "DS PRO Encrypt",
-    whatTurnsOn = "Compresses and encrypts all classes*.dex payloads into V5 AES-256-GCM per-DEX ephemeral keys bound to classes.dex & guard hashes, using a decoupled ClassLoader shell and XOR-obfuscated loader strings.",
-    howItWorks = "Replaces classes.dex with a tamper-locked loader, mounts InMemoryDexClassLoader outside dexElements, wipes DirectByteBuffers immediately, and always runs core anti-dump/anti-virtualizer guards before & after decryption.",
-)
-
-private val INFO_STRING_ENCRYPTION = ProtectionFeatureInfo(
-    id = "string_encryption",
-    title = "String Encryption",
-    whatTurnsOn = "Encrypts non-structural printable ASCII literal strings inside DEX string_data_item pools with per-DEX high-bit stream keys and stores the encrypted patch table inside dspro_core.bin.",
-    howItWorks = "Eliminates plaintext URLs, endpoints, and message literals from static DEX analysis and memory snapshots prior to runtime unlock inside a wiped DirectByteBuffer.",
-)
-
-private val INFO_CONTROL_FLOW = ProtectionFeatureInfo(
-    id = "control_flow_obfuscation",
-    title = "Control Flow Obfuscation",
-    whatTurnsOn = "Transforms Dalvik bytecode in classes*.dex by converting reachable nop slots into relative jumps and threading conditional/unconditional branches through trampoline chains.",
-    howItWorks = "Scrambles control-flow graphs seen by decompilers (JADX/Apktool) while keeping instruction boundaries, switch payloads, and ART verification 100% intact.",
-)
-
-private val INFO_RESOURCE_ENCRYPTION = ProtectionFeatureInfo(
-    id = "resource_encryption",
-    title = "Resource Encryption",
-    whatTurnsOn = "Encrypts compressible app assets (JSON, text, configs, web/data files) with AES-256-GCM into assets/dspro_res.bin while keeping native .so, .tflite, and STORED media safely untouched.",
-    howItWorks = "Decrypts and dynamically mounts encrypted assets at startup using Android ResourcesLoader / AssetManager without leaving readable copies on external storage.",
-)
-
-private val INFO_DISABLE_DEBUGGABLE = ProtectionFeatureInfo(
-    id = "disable_debuggable",
-    title = "Block Debuggable",
-    whatTurnsOn = "Patches binary AndroidManifest.xml to set android:debuggable=\"false\".",
-    howItWorks = "Blocks JDWP debugger attachment and run-as inspection at the Android OS level without altering the rest of the manifest.",
+    title = "DEX Integrity",
+    fullName = "DEX Bytecode Integrity Verification",
+    summary = "Makes sure no extra mod code or cheat patches were added to your app.",
+    protections = listOf(
+        "Verifies your app's compiled code files before launch",
+        "Detects extra or modified code injected into memory",
+        "Stops the app immediately if any unauthorized code is found",
+    ),
 )
 
 private val INFO_ASSIST_ENCRYPT = ProtectionFeatureInfo(
     id = "assist_encrypt",
     title = "Assist Encrypt",
-    whatTurnsOn = "Encrypts modifiable files inside assets/ (XML, JSON, ZIP archives, databases, configs, scripts, text & data — including STORED entries) with AES-256-GCM into assets/dspro_res.bin.",
-    howItWorks = "Removes plain editable files from assets/ so attackers cannot view or modify them, then transparently decrypts and mounts the protected overlay vault at runtime via Android ResourcesLoader / AssetManager with zero broken functionality.",
+    fullName = "Assets Folder File Encryption",
+    summary = "Locks editable files inside the assets folder so nobody can modify them.",
+    protections = listOf(
+        "Protects XML, JSON, ZIP, database, and config files in assets",
+        "Prevents modders from opening or editing those files inside the APK",
+        "Keeps all original app features working smoothly",
+    ),
 )
 
-private val INFO_DEVICE_CERTIFICATE = ProtectionFeatureInfo(
-    id = "device_certificate",
-    title = "Device Certificate",
-    whatTurnsOn = "Activates Google Play Store / GMS Device Certification, Verified Boot & Hardware Attestation guard with automatic <queries> manifest visibility.",
-    howItWorks = "Verifies that official Google Play Store and Play Services system packages are installed and enabled, Build.TAGS & Verified Boot are intact, and hardware KeyStore RootOfTrust is locked. Displays a warning dialog and crashes if Play Store is disabled or the device lacks valid certification.",
+private val INFO_DSPRO_ENCRYPT = ProtectionFeatureInfo(
+    id = "dspro_dex_encryption",
+    title = "DS PRO Encrypt",
+    fullName = "DS PRO Core DEX Encryption",
+    summary = "Locks and hides your app's main compiled program code.",
+    protections = listOf(
+        "Hides your app's classes and logic from decompiler tools",
+        "Prevents hackers from easily reading or copying app behavior",
+        "Loads the protected code safely only while running",
+    ),
+)
+
+private val INFO_STRING_ENCRYPTION = ProtectionFeatureInfo(
+    id = "string_encryption",
+    title = "String Encrypt",
+    fullName = "DEX String Literal Encryption",
+    summary = "Hides important text inside your app's code from static scanning.",
+    protections = listOf(
+        "Hides website links, API endpoints, and server addresses",
+        "Masks secret text, messages, and internal keywords in the APK",
+        "Restores text automatically when your app needs it",
+    ),
+)
+
+private val INFO_CONTROL_FLOW = ProtectionFeatureInfo(
+    id = "control_flow_obfuscation",
+    title = "Flow Guard",
+    fullName = "Control Flow Obfuscation",
+    summary = "Makes your app's code logic very hard for reverse engineers to follow.",
+    protections = listOf(
+        "Scrambles condition paths and logic flow inside decompilers",
+        "Makes code analysis confusing and time-consuming for attackers",
+        "Keeps your app running smoothly at normal speed",
+    ),
+)
+
+private val INFO_RESOURCE_ENCRYPTION = ProtectionFeatureInfo(
+    id = "resource_encryption",
+    title = "Res Encrypt",
+    fullName = "App Resource & Data Encryption",
+    summary = "Protects internal app data and configuration files inside the APK.",
+    protections = listOf(
+        "Locks packaged JSON, text, web, and data files from extraction",
+        "Prevents outsiders from viewing or copying internal data files",
+        "Keeps media and native features working normally",
+    ),
+)
+
+private val INFO_DISABLE_DEBUGGABLE = ProtectionFeatureInfo(
+    id = "disable_debuggable",
+    title = "Block Debug",
+    fullName = "Disable App Debuggable Mode",
+    summary = "Forces the app into strict release mode at the Android system level.",
+    protections = listOf(
+        "Blocks USB/ADB debugging attachment by Android OS",
+        "Stops outsiders from accessing private app storage files",
+        "Secures apps that were originally built with debug mode enabled",
+    ),
 )
 
 private val INFO_STRIP_DEX_DEBUG = ProtectionFeatureInfo(
     id = "strip_dex_debug",
-    title = "Strip DEX Debug",
-    whatTurnsOn = "Zeros source_file_idx, clears debug_info_off, and physically wipes debug_info_item payloads across all DEX bytecode with recalculated SHA-1/Adler32 checksums.",
-    howItWorks = "Strips original source file names, line numbers, and local variable debug symbols so reverse-engineering tools cannot inspect debug names.",
+    title = "Strip Debug",
+    fullName = "Strip DEX Debug Information",
+    summary = "Removes leftover developer debug clues from the compiled app.",
+    protections = listOf(
+        "Removes original source file names from the compiled code",
+        "Clears line numbers and internal variable names",
+        "Makes decompiled code much harder to understand without slowing the app",
+    ),
 )
 
 private fun runtimeGuardToggles(cfg: ProtectionConfig, vm: MainViewModel) = listOf(
     ToggleSpec(INFO_DETECT_ROOT, cfg.detectRoot, "switch_detect_root") { v -> vm.updateConfig { it.copy(detectRoot = v) } },
     ToggleSpec(INFO_DETECT_DEBUGGER, cfg.detectDebugger, "switch_detect_debugger") { v -> vm.updateConfig { it.copy(detectDebugger = v) } },
+    ToggleSpec(INFO_DEVICE_CERTIFICATE, cfg.deviceCertificate, "switch_device_certificate") { v -> vm.updateConfig { it.copy(deviceCertificate = v) } },
     ToggleSpec(INFO_ANTI_SCREENSHOT, cfg.antiScreenshot, "switch_anti_screenshot") { v -> vm.updateConfig { it.copy(antiScreenshot = v) } },
     ToggleSpec(INFO_ANTI_TAMPERING, cfg.antiTampering, "switch_anti_tampering") { v -> vm.updateConfig { it.copy(antiTampering = v) } },
     ToggleSpec(INFO_ANTI_DUMP, cfg.antiDump, "switch_anti_dump") { v -> vm.updateConfig { it.copy(antiDump = v) } },
     ToggleSpec(INFO_DEX_INTEGRITY, cfg.dexIntegrityProtection, "switch_dex_integrity") { v -> vm.updateConfig { it.copy(dexIntegrityProtection = v) } },
     ToggleSpec(INFO_ASSIST_ENCRYPT, cfg.assistEncrypt, "switch_assist_encrypt") { v -> vm.updateConfig { it.copy(assistEncrypt = v) } },
-    ToggleSpec(INFO_DEVICE_CERTIFICATE, cfg.deviceCertificate, "switch_device_certificate") { v -> vm.updateConfig { it.copy(deviceCertificate = v) } },
 )
 
 private fun binaryHardeningToggles(cfg: ProtectionConfig, vm: MainViewModel) = listOf(

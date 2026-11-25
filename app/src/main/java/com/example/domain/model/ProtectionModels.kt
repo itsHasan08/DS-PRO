@@ -8,8 +8,9 @@ enum class ProtectionSection(val label: String) {
 data class ProtectionFeatureInfo(
     val id: String,
     val title: String,
-    val whatTurnsOn: String,
-    val howItWorks: String,
+    val fullName: String = title,
+    val summary: String,
+    val protections: List<String> = emptyList(),
 )
 
 data class ProtectionConfig(

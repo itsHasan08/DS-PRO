@@ -33,7 +33,6 @@ class ApkAnalyzerEngine(private val context: Context) {
 
             val displayName = resolveDisplayName(uri) ?: "selected.apk"
             val sanitizedName = displayName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-            workDir.listFiles()?.filter { it.name.startsWith("input_") }?.forEach { it.delete() }
             val targetFile = File(workDir, "input_${System.currentTimeMillis()}_$sanitizedName")
 
             context.contentResolver.openInputStream(uri)?.use { input ->
@@ -63,6 +62,10 @@ class ApkAnalyzerEngine(private val context: Context) {
                 targetFile.delete()
                 "Please select a valid .apk file."
             }
+
+            workDir.listFiles()
+                ?.filter { it.name.startsWith("input_") && it.name != targetFile.name }
+                ?.forEach { it.delete() }
 
             inspectApkFile(targetFile, displayName)
         }

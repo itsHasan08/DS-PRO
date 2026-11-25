@@ -194,8 +194,12 @@ object DexPatcher {
         }
 
         val sha256 = MessageDigest.getInstance("SHA-256")
-        val patchEntries = ArrayList<Pair<Int, Int>>()
         val seenDataOffsets = HashSet<Int>()
+        var patchOffsets = IntArray(1024)
+        var patchLengths = IntArray(1024)
+        var patchCount = 0
+        val metaBuf = ByteArray(6)
+        val digestBuf = ByteArray(32)
 
         for (idx in 0 until stringIdsSize) {
             if (protectedStringIndices[idx]) continue
@@ -220,25 +224,33 @@ object DexPatcher {
             }
             if (!purePrintableAscii) continue
 
-            applyAsciiStreamXor(out, dataStart, utf16Len, stringKey, sha256)
-            patchEntries += dataStart to utf16Len
+            applyAsciiStreamXor(out, dataStart, utf16Len, stringKey, sha256, metaBuf, digestBuf)
+            if (patchCount == patchOffsets.size) {
+                patchOffsets = patchOffsets.copyOf(patchCount * 2)
+                patchLengths = patchLengths.copyOf(patchCount * 2)
+            }
+            patchOffsets[patchCount] = dataStart
+            patchLengths[patchCount] = utf16Len
+            patchCount++
         }
+        metaBuf.fill(0)
+        digestBuf.fill(0)
 
-        if (patchEntries.isEmpty()) {
+        if (patchCount == 0) {
             return DexStringEncryptResult(dexBytes, 0, ByteArray(0))
         }
 
-        val rawPatch = ByteArrayOutputStream(patchEntries.size * 8 + 4)
+        val rawPatch = ByteArrayOutputStream(patchCount * 6 + 4)
         DataOutputStream(rawPatch).use { dos ->
-            dos.writeInt(patchEntries.size)
-            for ((off, len) in patchEntries) {
-                dos.writeInt(off)
-                dos.writeShort(len)
+            dos.writeInt(patchCount)
+            for (i in 0 until patchCount) {
+                dos.writeInt(patchOffsets[i])
+                dos.writeShort(patchLengths[i])
             }
             dos.flush()
         }
 
-        val deflater = Deflater(Deflater.DEFAULT_COMPRESSION)
+        val deflater = Deflater(4)
         val deflatedPatch = ByteArrayOutputStream()
         try {
             val rawBytes = rawPatch.toByteArray()
@@ -256,7 +268,7 @@ object DexPatcher {
 
         return DexStringEncryptResult(
             encryptedDexBytes = out,
-            encryptedStringCount = patchEntries.size,
+            encryptedStringCount = patchCount,
             compressedPatchBlob = deflatedPatch.toByteArray(),
         )
     }
@@ -272,27 +284,26 @@ object DexPatcher {
         length: Int,
         key: ByteArray,
         sha256: MessageDigest = MessageDigest.getInstance("SHA-256"),
+        metaBuf: ByteArray = ByteArray(6),
+        block: ByteArray = ByteArray(32),
     ) {
+        metaBuf[0] = (offset ushr 24).toByte()
+        metaBuf[1] = (offset ushr 16).toByte()
+        metaBuf[2] = (offset ushr 8).toByte()
+        metaBuf[3] = offset.toByte()
+        metaBuf[4] = (length ushr 8).toByte()
+        metaBuf[5] = length.toByte()
         sha256.reset()
         sha256.update(key)
-        sha256.update(
-            byteArrayOf(
-                (offset ushr 24).toByte(),
-                (offset ushr 16).toByte(),
-                (offset ushr 8).toByte(),
-                offset.toByte(),
-                (length ushr 8).toByte(),
-                length.toByte(),
-            ),
-        )
-        var block = sha256.digest()
+        sha256.update(metaBuf)
+        sha256.digest(block, 0, block.size)
         var bPos = 0
         for (i in 0 until length) {
             if (bPos >= block.size) {
                 sha256.reset()
                 sha256.update(block)
                 sha256.update(key)
-                block = sha256.digest()
+                sha256.digest(block, 0, block.size)
                 bPos = 0
             }
             val mask = (block[bPos++].toInt() and 0x7F) or 0x80

@@ -100,9 +100,23 @@ class MainViewModel(
         val currentState = _uiState.value
         if (currentState.isProcessing || currentState.isLoadingApk || currentState.isRefreshing) return
 
-        val uriStr = currentState.selectedApkUri
         viewModelScope.launch {
             val startedAt = System.currentTimeMillis()
+            if (currentState.isExported) {
+                _uiState.update { it.copy(isRefreshing = true) }
+                protectionProcessor.clearWorkCache()
+                val elapsed = System.currentTimeMillis() - startedAt
+                if (elapsed < 420L) {
+                    delay(420L - elapsed)
+                }
+                _uiState.value = DsProUiState(
+                    isRefreshing = false,
+                    statusMessage = "Workspace reset for a new APK",
+                )
+                return@launch
+            }
+
+            val uriStr = currentState.selectedApkUri
             _uiState.update {
                 it.copy(
                     isRefreshing = true,
@@ -117,7 +131,7 @@ class MainViewModel(
             }
 
             if (uriStr == null) {
-                delay(480L)
+                delay(420L)
                 _uiState.update {
                     it.copy(
                         isRefreshing = false,
@@ -141,8 +155,8 @@ class MainViewModel(
 
             val reloadResult = analyzerEngine.loadApkFromUri(parsedUri)
             val elapsed = System.currentTimeMillis() - startedAt
-            if (elapsed < 480L) {
-                delay(480L - elapsed)
+            if (elapsed < 420L) {
+                delay(420L - elapsed)
             }
 
             reloadResult

@@ -37,7 +37,10 @@ final class DsProHostClassLoader extends PathClassLoader {
             || name.startsWith("org.xml.")
             || name.startsWith("org.json.")
             || name.startsWith("com.dspro.")
-            || (name.startsWith("android.") && !name.startsWith("android.support."));
+            || (name.startsWith("android.")
+                && !name.startsWith("android.support.")
+                && !name.startsWith("android.arch.")
+                && !name.startsWith("android.databinding."));
     }
 
     @Override
@@ -119,10 +122,38 @@ final class DsProHostClassLoader extends PathClassLoader {
         if (lib != null) {
             return lib;
         }
+        ClassLoader parent = getParent();
+        if (parent instanceof BaseDexClassLoader) {
+            lib = ((BaseDexClassLoader) parent).findLibrary(name);
+            if (lib != null) {
+                return lib;
+            }
+        }
         ClassLoader m = mem();
         if (m instanceof BaseDexClassLoader) {
             return ((BaseDexClassLoader) m).findLibrary(name);
         }
         return null;
+    }
+
+    static final class ResourceBridgeClassLoader extends ClassLoader {
+        private final ClassLoader resourceDelegate;
+
+        ResourceBridgeClassLoader(ClassLoader bootParent, ClassLoader resourceDelegate) {
+            super(bootParent);
+            this.resourceDelegate = resourceDelegate;
+        }
+
+        @Override
+        protected java.net.URL findResource(String name) {
+            return resourceDelegate != null ? resourceDelegate.getResource(name) : null;
+        }
+
+        @Override
+        protected java.util.Enumeration<java.net.URL> findResources(String name) throws java.io.IOException {
+            return resourceDelegate != null
+                ? resourceDelegate.getResources(name)
+                : java.util.Collections.emptyEnumeration();
+        }
     }
 }

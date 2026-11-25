@@ -158,14 +158,7 @@ final class DsProCoreLoader {
         if (meta == null || !meta.requireGuard || guardProviderInstantiated) {
             return;
         }
-        ClassLoader cl = activeClassLoader;
-        if (cl != null) {
-            try {
-                Class.forName(GUARD_PROVIDER_NAME, false, cl);
-            } catch (ClassNotFoundException e) {
-                throw new SecurityException(/*O*/"DS PRO Protection: Guard integrity compromised"/*O*/);
-            }
-        }
+        throw new SecurityException(/*O*/"DS PRO Protection: Guard integrity compromised"/*O*/);
     }
 
     static synchronized void markInitialized(
@@ -246,21 +239,24 @@ final class DsProCoreLoader {
 
             if (Build.VERSION.SDK_INT >= 30) {
                 File tmp = File.createTempFile(/*O*/".dspro_rv_"/*O*/, ".apk", cacheDir);
-                try (FileOutputStream fos = new FileOutputStream(tmp)) {
-                    fos.write(plainZip);
-                    fos.flush();
-                }
-                ParcelFileDescriptor pfd = ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY);
-                tmp.delete();
+                ParcelFileDescriptor pfd = null;
                 try {
+                    try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                        fos.write(plainZip);
+                        fos.flush();
+                    }
+                    pfd = ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY);
                     ResourcesLoader loader = new ResourcesLoader();
                     loader.addProvider(ResourcesProvider.loadFromApk(pfd));
                     cachedResourcesLoader = loader;
                 } finally {
-                    try {
-                        pfd.close();
-                    } catch (Throwable ignored) {
+                    if (pfd != null) {
+                        try {
+                            pfd.close();
+                        } catch (Throwable ignored) {
+                        }
                     }
+                    tmp.delete();
                 }
             } else {
                 File vaultFile = new File(cacheDir, /*O*/".dspro_rv_"/*O*/ + Integer.toHexString(apkPath.hashCode()) + ".apk");
@@ -334,14 +330,16 @@ final class DsProCoreLoader {
             public void run() {
                 int cycle = 0;
                 while (true) {
-                    try {
-                        long sleepMs = (cycle < 5) ? 600L : 3000L;
-                        Thread.sleep(sleepMs);
-                    } catch (InterruptedException ignored) {
-                        return;
+                    if (cycle > 0) {
+                        try {
+                            long sleepMs = (cycle < 5) ? 800L : 5000L;
+                            Thread.sleep(sleepMs);
+                        } catch (InterruptedException ignored) {
+                            return;
+                        }
                     }
                     try {
-                        boolean deepScan = (cycle % 6 == 0);
+                        boolean deepScan = (cycle % 12 == 0);
                         String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, deepScan, false);
                         if (threat != null) {
                             fatalTerminate(mainHandler, threat);
@@ -400,9 +398,16 @@ final class DsProCoreLoader {
     }
 
     static void enforcePreDecryptAntiDump(String apkPath, String dataDir, String packageName, boolean strictAntiDump) {
-        String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, true, true);
-        if (threat != null) {
-            throw new SecurityException(threat);
+        // decryptAll() already checked hasTracerAttached() and hasHookedCoreMethods(true) at entry;
+        // keep additional synchronous pre-decrypt checks sub-millisecond so cold launch stays fast.
+        if (strictAntiDump && (Debug.isDebuggerConnected() || Debug.waitingForDebugger())) {
+            throw new SecurityException(/*O*/"DS PRO Protection: Memory debugger blocked"/*O*/);
+        }
+        if (hasSuspiciousJavaThreads() || hasHookedInstrumentation()) {
+            throw new SecurityException(/*O*/"DS PRO Protection: Memory dumper detected"/*O*/);
+        }
+        if (hasVirtualContainerHints(apkPath, dataDir)) {
+            throw new SecurityException(/*O*/"DS PRO Protection: Virtual container / dumper sandbox blocked"/*O*/);
         }
     }
 
@@ -698,6 +703,7 @@ final class DsProCoreLoader {
         MessageDigest sha256
     ) throws Exception {
         byte[] metaBuf = new byte[6];
+        byte[] digestBuf = new byte[32];
         try (DataInputStream pdis = new DataInputStream(new ByteArrayInputStream(patchPlain))) {
             int count = pdis.readInt();
             for (int i = 0; i < count; i++) {
@@ -706,10 +712,11 @@ final class DsProCoreLoader {
                 if (offset < 0 || length <= 0 || offset + length > dexBytes.length) {
                     throw new SecurityException(/*O*/"DS PRO Protection: Invalid string patch offset"/*O*/);
                 }
-                unlockAsciiSlice(dexBytes, offset, length, strKey, sha256, metaBuf);
+                unlockAsciiSlice(dexBytes, offset, length, strKey, sha256, metaBuf, digestBuf);
             }
         } finally {
             Arrays.fill(metaBuf, (byte) 0);
+            Arrays.fill(digestBuf, (byte) 0);
         }
     }
 
@@ -719,8 +726,9 @@ final class DsProCoreLoader {
         int length,
         byte[] key,
         MessageDigest sha256,
-        byte[] metaBuf
-    ) {
+        byte[] metaBuf,
+        byte[] block
+    ) throws Exception {
         metaBuf[0] = (byte) (offset >>> 24);
         metaBuf[1] = (byte) (offset >>> 16);
         metaBuf[2] = (byte) (offset >>> 8);
@@ -730,21 +738,19 @@ final class DsProCoreLoader {
         sha256.reset();
         sha256.update(key);
         sha256.update(metaBuf);
-        byte[] block = sha256.digest();
+        sha256.digest(block, 0, block.length);
         int bPos = 0;
         for (int i = 0; i < length; i++) {
             if (bPos >= block.length) {
                 sha256.reset();
                 sha256.update(block);
                 sha256.update(key);
-                Arrays.fill(block, (byte) 0);
-                block = sha256.digest();
+                sha256.digest(block, 0, block.length);
                 bPos = 0;
             }
             int mask = (block[bPos++] & 0x7F) | 0x80;
             bytes[offset + i] = (byte) ((bytes[offset + i] & 0xFF) ^ mask);
         }
-        Arrays.fill(block, (byte) 0);
     }
 
     private static void verifyDecryptedDexIntegrity(
@@ -864,7 +870,7 @@ final class DsProCoreLoader {
         return false;
     }
 
-    private static boolean isRunningInVirtualContainerAndScanMaps(String apkPath, String dataDir, String packageName) {
+    private static boolean hasVirtualContainerHints(String apkPath, String dataDir) {
         if (apkPath != null) {
             String lower = apkPath.toLowerCase(Locale.US);
             if (lower.contains(/*O*/"/data/data/"/*O*/)
@@ -889,12 +895,13 @@ final class DsProCoreLoader {
                 || lower.contains(/*O*/"sandvxposed"/*O*/)
                 || lower.contains(/*O*/"dualspace"/*O*/)
                 || lower.contains(/*O*/"virtualapp"/*O*/)
-                || lower.contains(/*O*/"parallel"/*O*/)
+                || lower.contains(/*O*/"com.lbe.parallel"/*O*/)
+                || lower.contains(/*O*/"parallel.space"/*O*/)
+                || lower.contains(/*O*/"parallel_intl"/*O*/)
                 || lower.contains(/*O*/"cloneapp"/*O*/)) {
                 return true;
             }
         }
-        boolean checkPkgInMaps = false;
         String cmdline = readCmdline();
         if (!cmdline.isEmpty()) {
             String lowerCmd = cmdline.toLowerCase(Locale.US);
@@ -905,17 +912,27 @@ final class DsProCoreLoader {
                 || lowerCmd.contains(/*O*/"com.lody"/*O*/)
                 || lowerCmd.contains(/*O*/"sandvxposed"/*O*/)
                 || lowerCmd.contains(/*O*/"dualspace"/*O*/)
-                || lowerCmd.contains(/*O*/"parallel"/*O*/)
+                || lowerCmd.contains(/*O*/"com.lbe.parallel"/*O*/)
+                || lowerCmd.contains(/*O*/"parallel.space"/*O*/)
                 || lowerCmd.contains(/*O*/"excean"/*O*/)
                 || lowerCmd.contains(/*O*/"gbox"/*O*/)
                 || lowerCmd.contains(/*O*/"ludashi"/*O*/)
                 || lowerCmd.contains(/*O*/"cloneapp"/*O*/)
-                || lowerCmd.contains(/*O*/"dumper"/*O*/)) {
+                || lowerCmd.contains(/*O*/"dexdumper"/*O*/)) {
                 return true;
             }
-            if (!Process.isIsolated() && packageName != null && !packageName.isEmpty() && !cmdline.startsWith(packageName)) {
-                checkPkgInMaps = true;
-            }
+        }
+        return false;
+    }
+
+    private static boolean isRunningInVirtualContainerAndScanMaps(String apkPath, String dataDir, String packageName) {
+        if (hasVirtualContainerHints(apkPath, dataDir)) {
+            return true;
+        }
+        boolean checkPkgInMaps = false;
+        String cmdline = readCmdline();
+        if (!cmdline.isEmpty() && !Process.isIsolated() && packageName != null && !packageName.isEmpty() && !cmdline.startsWith(packageName)) {
+            checkPkgInMaps = true;
         }
         return scanProcMaps(packageName, checkPkgInMaps);
     }
@@ -1038,11 +1055,15 @@ final class DsProCoreLoader {
                 if (!foundPkgApk && lowerPkg != null && lower.contains(lowerPkg) && lower.contains(".apk")) {
                     foundPkgApk = true;
                 }
-                if (lower.contains(/*O*/"frida"/*O*/)
+                if (lower.contains(/*O*/"frida-agent"/*O*/)
+                    || lower.contains(/*O*/"frida-gadget"/*O*/)
+                    || lower.contains(/*O*/"frida-server"/*O*/)
                     || lower.contains(/*O*/"re.frida"/*O*/)
                     || lower.contains(/*O*/"memfd:frida"/*O*/)
-                    || lower.contains(/*O*/"hluda"/*O*/)
-                    || lower.contains(/*O*/"florida"/*O*/)
+                    || lower.contains(/*O*/"libhluda"/*O*/)
+                    || lower.contains(/*O*/"hluda-"/*O*/)
+                    || lower.contains(/*O*/"libflorida"/*O*/)
+                    || lower.contains(/*O*/"florida-"/*O*/)
                     || lower.contains(/*O*/"linjector"/*O*/)
                     || lower.contains(/*O*/"blackdex"/*O*/)
                     || lower.contains(/*O*/"blackbox"/*O*/)
@@ -1143,9 +1164,15 @@ final class DsProCoreLoader {
             if (fds != null) {
                 for (File fd : fds) {
                     String target = safeLower(fd.getCanonicalPath());
-                    if (target.contains(/*O*/"frida"/*O*/)
-                        || target.contains(/*O*/"hluda"/*O*/)
-                        || target.contains(/*O*/"florida"/*O*/)
+                    if (target.contains(/*O*/"frida-agent"/*O*/)
+                        || target.contains(/*O*/"frida-gadget"/*O*/)
+                        || target.contains(/*O*/"frida-server"/*O*/)
+                        || target.contains(/*O*/"re.frida"/*O*/)
+                        || target.contains(/*O*/"memfd:frida"/*O*/)
+                        || target.contains(/*O*/"libhluda"/*O*/)
+                        || target.contains(/*O*/"hluda-"/*O*/)
+                        || target.contains(/*O*/"libflorida"/*O*/)
+                        || target.contains(/*O*/"florida-"/*O*/)
                         || target.contains(/*O*/"blackdex"/*O*/)
                         || target.contains(/*O*/"blackbox"/*O*/)
                         || target.contains(/*O*/"dumpdex"/*O*/)
@@ -1172,7 +1199,7 @@ final class DsProCoreLoader {
     private static boolean hasDumperSockets() {
         return containsFridaListeningPort(/*O*/"/proc/net/tcp"/*O*/)
             || containsFridaListeningPort(/*O*/"/proc/net/tcp6"/*O*/)
-            || containsInFile(/*O*/"/proc/net/unix"/*O*/, /*O*/"frida"/*O*/, /*O*/"linjector"/*O*/, /*O*/"hluda"/*O*/, /*O*/"florida"/*O*/, /*O*/"blackdex"/*O*/);
+            || containsInFile(/*O*/"/proc/net/unix"/*O*/, /*O*/"frida-agent"/*O*/, /*O*/"frida-server"/*O*/, /*O*/"linjector"/*O*/, /*O*/"libhluda"/*O*/, /*O*/"libflorida"/*O*/, /*O*/"blackdex"/*O*/);
     }
 
     private static boolean containsFridaListeningPort(String tcpPath) {
@@ -1215,12 +1242,16 @@ final class DsProCoreLoader {
         }
     }
 
+    private static final char[] HEX_CHARS = "0123456789abcdef".toCharArray();
+
     private static String toLowerHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format(Locale.US, "%02x", b & 0xFF));
+        char[] chars = new char[bytes.length * 2];
+        for (int i = 0; i < bytes.length; i++) {
+            int v = bytes[i] & 0xFF;
+            chars[i * 2] = HEX_CHARS[v >>> 4];
+            chars[i * 2 + 1] = HEX_CHARS[v & 0x0F];
         }
-        return sb.toString();
+        return new String(chars);
     }
 
     private static byte[] hexToBytes(String hex) {

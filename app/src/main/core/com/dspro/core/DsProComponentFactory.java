@@ -32,10 +32,14 @@ public final class DsProComponentFactory extends AppComponentFactory {
                 aInfo.dataDir
             );
             String librarySearchPath = buildLibrarySearchPath(aInfo);
+            ClassLoader bootParent = (cl != null && cl.getParent() != null) ? cl.getParent() : cl;
+            ClassLoader resourceBridge = (cl != null && bootParent != cl)
+                ? new DsProHostClassLoader.ResourceBridgeClassLoader(bootParent, cl)
+                : bootParent;
             ClassLoader memLoader = new InMemoryDexClassLoader(
                 bundle.dexBuffers,
                 librarySearchPath,
-                cl
+                resourceBridge
             );
             DsProCoreLoader.wipeBuffers(bundle.dexBuffers);
             ClassLoader hostShell = new DsProHostClassLoader(librarySearchPath, cl, memLoader);

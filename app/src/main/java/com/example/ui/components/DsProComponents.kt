@@ -11,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -28,17 +30,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
@@ -64,13 +73,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -78,6 +90,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.domain.engine.formatBytes
 import com.example.domain.model.ProtectionFeatureInfo
@@ -105,7 +118,7 @@ import java.util.Locale
 
 @Composable
 fun DsProTopBar(
-    activeCount: Int,
+    onInfoClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -121,7 +134,7 @@ fun DsProTopBar(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                    .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
@@ -155,11 +168,39 @@ fun DsProTopBar(
                     )
                 }
 
-                StatusPill(
-                    text = "$activeCount Active",
-                    containerColor = if (activeCount > 0) SuccessTint else ProBlueTint,
-                    contentColor = if (activeCount > 0) SuccessEmerald else ProBlueDark,
-                )
+                Box(
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .clip(RoundedCornerShape(50))
+                        .clickable(role = Role.Button, onClick = onInfoClick)
+                        .padding(horizontal = 4.dp)
+                        .testTag("top_bar_info_button"),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = ProBlueTint,
+                        border = BorderStroke(1.dp, ProBlue.copy(alpha = 0.25f)),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Info,
+                                contentDescription = "Developer & App Info",
+                                tint = ProBlueDark,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                text = "Info",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                color = ProBlueDark,
+                            )
+                        }
+                    }
+                }
             }
             HorizontalDivider(thickness = 1.dp, color = BorderSubtle)
         }
@@ -329,13 +370,17 @@ fun GridToggleTile(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 54.dp)
-                .padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                .heightIn(min = 58.dp)
+                .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 15.sp,
+                    letterSpacing = 0.sp,
+                ),
                 color = CharcoalText,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -357,13 +402,13 @@ fun GridToggleTile(
                 )
             }
             Box(
-                modifier = Modifier.size(width = 42.dp, height = 48.dp),
+                modifier = Modifier.size(width = 40.dp, height = 48.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Switch(
                     checked = checked,
                     onCheckedChange = onCheckedChange,
-                    modifier = Modifier.scale(0.76f),
+                    modifier = Modifier.scale(0.74f),
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = PureWhite,
                         checkedTrackColor = accentColor,
@@ -426,19 +471,37 @@ fun ProtectionPipelineCard(
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "pipeline_live")
-    val spinAngle by infiniteTransition.animateFloat(
+    val orbitAngle by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1000, easing = LinearEasing),
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
         ),
-        label = "sync_spin",
+        label = "orbit_angle",
+    )
+    val radarWave by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "radar_wave",
+    )
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.94f,
+        targetValue = 1.07f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 750),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "pulse_scale",
     )
     val shimmerOffset by infiniteTransition.animateFloat(
         initialValue = -0.35f,
         targetValue = 1.35f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
             repeatMode = RepeatMode.Restart,
         ),
         label = "progress_shimmer",
@@ -465,7 +528,7 @@ fun ProtectionPipelineCard(
         shadowElevation = 2.dp,
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Top Animated Status Header
+            // Top Live Orbital Shield Header
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -480,39 +543,82 @@ fun ProtectionPipelineCard(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier.weight(1f),
                         ) {
                             Box(
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .clip(RoundedCornerShape(11.dp))
-                                    .background(PureWhite),
+                                modifier = Modifier.size(46.dp),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Icon(
-                                    imageVector = when {
-                                        hasFailure -> Icons.Filled.Error
-                                        isComplete -> Icons.Filled.VerifiedUser
-                                        else -> Icons.Filled.Sync
-                                    },
-                                    contentDescription = null,
-                                    tint = accentColor,
+                                if (isProcessing) {
+                                    Canvas(modifier = Modifier.fillMaxSize()) {
+                                        val maxR = size.minDimension / 2f
+                                        val r1 = (maxR * 0.56f) + (maxR * 0.44f * radarWave)
+                                        drawCircle(
+                                            color = accentColor.copy(alpha = (1f - radarWave) * 0.42f),
+                                            radius = r1,
+                                            style = Stroke(width = 2.dp.toPx()),
+                                        )
+                                        drawArc(
+                                            color = TealAccent,
+                                            startAngle = orbitAngle,
+                                            sweepAngle = 115f,
+                                            useCenter = false,
+                                            style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round),
+                                        )
+                                        drawArc(
+                                            color = ProBlue,
+                                            startAngle = orbitAngle + 180f,
+                                            sweepAngle = 80f,
+                                            useCenter = false,
+                                            style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round),
+                                        )
+                                    }
+                                }
+                                Box(
                                     modifier = Modifier
-                                        .size(21.dp)
-                                        .then(if (isProcessing) Modifier.rotate(spinAngle) else Modifier),
-                                )
+                                        .size(34.dp)
+                                        .scale(if (isProcessing) pulseScale else 1f)
+                                        .clip(CircleShape)
+                                        .background(PureWhite),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = when {
+                                            hasFailure -> Icons.Filled.Error
+                                            isComplete -> Icons.Filled.VerifiedUser
+                                            else -> Icons.Filled.Lock
+                                        },
+                                        contentDescription = null,
+                                        tint = accentColor,
+                                        modifier = Modifier.size(19.dp),
+                                    )
+                                }
                             }
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(
-                                    text = when {
-                                        hasFailure -> "Protection Failed"
-                                        isComplete -> "DS PRO Protection Applied"
-                                        else -> "Hardening APK..."
-                                    },
-                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = CharcoalText,
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = when {
+                                            hasFailure -> "Protection Failed"
+                                            isComplete -> "DS PRO Protection Applied"
+                                            else -> "Encrypting APK"
+                                        },
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = CharcoalText,
+                                    )
+                                    if (isProcessing) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .alpha(if (pulseScale > 1f) 1f else 0.45f)
+                                                .clip(CircleShape)
+                                                .background(TealAccent),
+                                        )
+                                    }
+                                }
                                 Text(
                                     text = when {
                                         hasFailure -> activeStageDetail ?: "Review failed stage below"
@@ -545,13 +651,13 @@ fun ProtectionPipelineCard(
                         }
                     }
 
-                    // Advanced Gradient Shimmer Progress Track
+                    // Live Dual-Accent Wave Progress Track
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(8.dp)
+                            .height(10.dp)
                             .clip(RoundedCornerShape(50))
-                            .background(PureWhite.copy(alpha = 0.85f)),
+                            .background(PureWhite.copy(alpha = 0.88f)),
                     ) {
                         val fillFraction = animatedProgress.coerceIn(0f, 1f)
                         if (fillFraction > 0f) {
@@ -564,11 +670,11 @@ fun ProtectionPipelineCard(
                                         brush = if (isProcessing) {
                                             Brush.linearGradient(
                                                 colors = listOf(
-                                                    accentColor,
-                                                    secondaryAccent,
-                                                    PureWhite.copy(alpha = 0.72f),
-                                                    secondaryAccent,
-                                                    accentColor,
+                                                    ProBlue,
+                                                    TealAccent,
+                                                    PureWhite.copy(alpha = 0.85f),
+                                                    TealAccent,
+                                                    ProBlueDark,
                                                 ),
                                                 start = Offset(shimmerOffset * 600f - 180f, 0f),
                                                 end = Offset(shimmerOffset * 600f + 180f, 0f),
@@ -605,7 +711,11 @@ fun ProtectionPipelineCard(
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(8.dp),
                                 color = chipBg,
-                                border = if (active) BorderStroke(1.dp, ProBlue.copy(alpha = 0.55f)) else null,
+                                border = if (active) {
+                                    BorderStroke(1.2.dp, ProBlue.copy(alpha = if (pulseScale > 1f) 0.9f else 0.45f))
+                                } else {
+                                    null
+                                },
                             ) {
                                 Text(
                                     text = label,
@@ -732,6 +842,16 @@ fun ProtectionPipelineCard(
 
 @Composable
 private fun LiveActiveTimelineRow(detail: String) {
+    val liveTransition = rememberInfiniteTransition(label = "live_row")
+    val haloAlpha by liveTransition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 700),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "halo_alpha",
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -744,8 +864,15 @@ private fun LiveActiveTimelineRow(detail: String) {
                 .padding(top = 2.dp),
             contentAlignment = Alignment.Center,
         ) {
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .alpha(haloAlpha)
+                    .clip(CircleShape)
+                    .background(ProBlueTint),
+            )
             CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(16.dp),
                 strokeWidth = 2.dp,
                 color = ProBlue,
             )
@@ -769,13 +896,14 @@ private fun LiveActiveTimelineRow(detail: String) {
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
-                        .background(ProBlueTint)
+                        .background(TealTint)
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                 ) {
                     Text(
-                        text = "RUN",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = ProBlue,
+                        text = "LIVE",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = TealAccent,
+                        modifier = Modifier.alpha(haloAlpha),
                     )
                 }
             }
@@ -908,13 +1036,15 @@ fun FeatureInfoDialog(
         },
         title = {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    text = info.title,
+                    text = info.fullName,
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                     color = CharcoalText,
+                    modifier = Modifier.weight(1f),
                 )
                 StatusPill(
                     text = if (isEnabled) "ON" else "OFF",
@@ -924,45 +1054,52 @@ fun FeatureInfoDialog(
             }
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    color = ProBlueTint.copy(alpha = 0.5f),
-                    border = BorderStroke(1.dp, ProBlue.copy(alpha = 0.25f)),
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = SectionGrey,
+                border = BorderStroke(1.dp, BorderSubtle),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
+                    Text(
+                        text = info.summary,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                        color = CharcoalText,
+                    )
+                    if (info.protections.isNotEmpty()) {
+                        HorizontalDivider(thickness = 1.dp, color = BorderSubtle)
                         Text(
-                            text = "What Turns ON",
+                            text = "Protections When Turned ON",
                             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                             color = ProBlueDark,
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = info.whatTurnsOn,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = CharcoalText,
-                        )
-                    }
-                }
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    color = SectionGrey,
-                    border = BorderStroke(1.dp, BorderSubtle),
-                ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        Text(
-                            text = "How It Works",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = CharcoalText,
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = info.howItWorks,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = SlateMuted,
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            info.protections.forEach { point ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.CheckCircle,
+                                        contentDescription = null,
+                                        tint = SuccessEmerald,
+                                        modifier = Modifier
+                                            .padding(top = 2.dp)
+                                            .size(15.dp),
+                                    )
+                                    Text(
+                                        text = point,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CharcoalText,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1008,6 +1145,257 @@ fun StatusPill(
                 color = contentColor,
             )
         }
+    }
+}
+
+@Composable
+fun DeveloperInfoDialog(
+    onDismiss: () -> Unit,
+) {
+    val uriHandler = LocalUriHandler.current
+    val scrollState = rememberScrollState()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PureWhite,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(
+                            Brush.linearGradient(colors = listOf(ProBlue, ProBlueDark)),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Shield,
+                        contentDescription = null,
+                        tint = PureWhite,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "DS PRO",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = CharcoalText,
+                    )
+                    Text(
+                        text = "APK Protection & Hardening Tool",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SlateMuted,
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(scrollState),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                // Developer Identity Card
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = ProBlueTint.copy(alpha = 0.55f),
+                    border = BorderStroke(1.dp, ProBlue.copy(alpha = 0.25f)),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(PureWhite),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Person,
+                                contentDescription = null,
+                                tint = ProBlue,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "DEVELOPER",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ProBlueDark,
+                            )
+                            Text(
+                                text = "MAHEDI HASAN",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = CharcoalText,
+                            )
+                        }
+                    }
+                }
+
+                // Support & Community Buttons (no raw links displayed for privacy)
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = SectionGrey,
+                    border = BorderStroke(1.dp, BorderSubtle),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = "Support & Community",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = CharcoalText,
+                        )
+                        SocialSupportButton(
+                            icon = Icons.AutoMirrored.Filled.Send,
+                            label = "Telegram",
+                            accentColor = ProBlue,
+                            accentTint = ProBlueTint,
+                            testTag = "support_telegram_direct",
+                            onClick = { runCatching { uriHandler.openUri("https://t.me/Its_Mahedi08") } },
+                        )
+                        SocialSupportButton(
+                            icon = Icons.Filled.Groups,
+                            label = "Telegram Channel",
+                            accentColor = TealAccent,
+                            accentTint = TealTint,
+                            testTag = "support_telegram_channel",
+                            onClick = { runCatching { uriHandler.openUri("https://t.me/CYBER_GENZ_OFC") } },
+                        )
+                        SocialSupportButton(
+                            icon = Icons.Filled.Phone,
+                            label = "WhatsApp",
+                            accentColor = SuccessEmerald,
+                            accentTint = SuccessTint,
+                            testTag = "support_whatsapp",
+                            onClick = { runCatching { uriHandler.openUri("https://wa.me/8801783862159") } },
+                        )
+                    }
+                }
+
+                // App Information & Important Guidelines
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = PureWhite,
+                    border = BorderStroke(1.dp, BorderSubtle),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = "App Information & Terms",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = CharcoalText,
+                        )
+                        InfoBulletLine("100% on-device APK protection & inspection without external uploads.")
+                        InfoBulletLine("Use only on applications you own or have permission to protect.")
+                        InfoBulletLine("Always keep a backup of your original APK and test after signing.")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("developer_info_close_button"),
+            ) {
+                Text("Close", color = ProBlue, fontWeight = FontWeight.SemiBold)
+            }
+        },
+    )
+}
+
+@Composable
+private fun SocialSupportButton(
+    icon: ImageVector,
+    label: String,
+    accentColor: Color,
+    accentTint: Color,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .testTag(testTag),
+        shape = RoundedCornerShape(10.dp),
+        color = PureWhite,
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.25f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(accentTint),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                color = CharcoalText,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                contentDescription = "Open $label",
+                tint = accentColor,
+                modifier = Modifier.size(17.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun InfoBulletLine(text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Filled.CheckCircle,
+            contentDescription = null,
+            tint = ProBlue,
+            modifier = Modifier
+                .padding(top = 2.dp)
+                .size(14.dp),
+        )
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = SlateMuted,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 

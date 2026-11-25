@@ -93,6 +93,7 @@ public final class DsProGuardProvider extends ContentProvider {
     private static volatile String pendingCertWarning = null;
     private static volatile boolean certCrashScheduled = false;
     private static volatile WeakReference<Activity> foregroundActivityRef = new WeakReference<>(null);
+    private static volatile WeakReference<Activity> shownCertDialogActivityRef = new WeakReference<>(null);
 
     private static volatile boolean resourcesMounted = false;
     private static volatile Object cachedResourcesLoader = null;
@@ -301,21 +302,24 @@ public final class DsProGuardProvider extends ContentProvider {
 
             if (Build.VERSION.SDK_INT >= 30) {
                 File tmp = File.createTempFile(/*O*/".dspro_rv_"/*O*/, ".apk", cacheDir);
-                try (FileOutputStream fos = new FileOutputStream(tmp)) {
-                    fos.write(plainZip);
-                    fos.flush();
-                }
-                ParcelFileDescriptor pfd = ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY);
-                tmp.delete();
+                ParcelFileDescriptor pfd = null;
                 try {
+                    try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                        fos.write(plainZip);
+                        fos.flush();
+                    }
+                    pfd = ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY);
                     ResourcesLoader loader = new ResourcesLoader();
                     loader.addProvider(ResourcesProvider.loadFromApk(pfd));
                     cachedResourcesLoader = loader;
                 } finally {
-                    try {
-                        pfd.close();
-                    } catch (Throwable ignored) {
+                    if (pfd != null) {
+                        try {
+                            pfd.close();
+                        } catch (Throwable ignored) {
+                        }
                     }
+                    tmp.delete();
                 }
             } else {
                 File vaultFile = new File(cacheDir, /*O*/".dspro_rv_"/*O*/ + Integer.toHexString(apkPath.hashCode()) + ".apk");
@@ -403,7 +407,7 @@ public final class DsProGuardProvider extends ContentProvider {
                     state = 0x219;
                     break;
                 case 0x219:
-                    if (policy.has(FLAG_ANTI_DUMP) && !coreInitialized && isMemoryDumpDetected(context, true)) {
+                    if (policy.has(FLAG_ANTI_DUMP) && !coreInitialized && isMemoryDumpDetected(context, false)) {
                         crashWithReason(/*O*/"Memory / APK dumper detected"/*O*/);
                     }
                     state = 0x34A;
@@ -424,8 +428,13 @@ public final class DsProGuardProvider extends ContentProvider {
                     state = 0x47C;
                     break;
                 case 0x47C:
-                    if (policy.has(FLAG_DEX_INTEGRITY) && !verifyDexIntegrity(context, policy.dexIntegrityEntries)) {
-                        crashWithReason(/*O*/"DEX integrity violation detected"/*O*/);
+                    if (policy.has(FLAG_DEX_INTEGRITY)) {
+                        boolean dexOk = coreInitialized
+                            ? verifyDexIntegrity(context, policy.dexIntegrityEntries)
+                            : verifyDexStructureQuick(context, policy.dexIntegrityEntries);
+                        if (!dexOk) {
+                            crashWithReason(/*O*/"DEX integrity violation detected"/*O*/);
+                        }
                     }
                     state = 0x591;
                     break;
@@ -453,10 +462,12 @@ public final class DsProGuardProvider extends ContentProvider {
             public void run() {
                 int cycle = 0;
                 boolean attestedOnce = false;
+                boolean fullIntegrityChecked = false;
+                boolean fullDexChecked = false;
                 while (true) {
                     if (cycle > 0) {
                         try {
-                            long sleepMs = (cycle < 5) ? 600L : 3000L;
+                            long sleepMs = (cycle < 5) ? 800L : 5000L;
                             Thread.sleep(sleepMs);
                         } catch (InterruptedException ignored) {
                             return;
@@ -466,7 +477,7 @@ public final class DsProGuardProvider extends ContentProvider {
                         if (policy.has(FLAG_DEVICE_CERTIFICATE)) {
                             boolean runAttestation = !attestedOnce;
                             attestedOnce = true;
-                            if (runAttestation || (cycle % 10 == 0)) {
+                            if (runAttestation || (cycle % 12 == 0)) {
                                 String certFailure = checkDeviceCertificateFailure(appContext, runAttestation);
                                 if (certFailure != null) {
                                     warnAndScheduleCrash(appContext, certFailure);
@@ -480,20 +491,32 @@ public final class DsProGuardProvider extends ContentProvider {
                         }
                         boolean coreMonActive = isCoreWatchdogRunning(appContext);
                         if (policy.has(FLAG_ANTI_DUMP) && !coreMonActive) {
-                            boolean deepScan = (cycle % 6 == 0);
+                            boolean deepScan = (cycle % 12 == 0);
                             if (isMemoryDumpDetected(appContext, deepScan)) {
                                 triggerMainCrash(mainHandler, /*O*/"Runtime memory / DEX dump blocked"/*O*/);
                                 return;
                             }
                         }
-                        if (policy.has(FLAG_DEX_INTEGRITY) && (cycle % 10 == 0)) {
-                            if (!verifyDexIntegrity(appContext, policy.dexIntegrityEntries)) {
+                        if (policy.has(FLAG_DEX_INTEGRITY)) {
+                            if (!fullDexChecked) {
+                                fullDexChecked = true;
+                                if (!verifyDexIntegrity(appContext, policy.dexIntegrityEntries)) {
+                                    triggerMainCrash(mainHandler, /*O*/"DEX integrity violation detected"/*O*/);
+                                    return;
+                                }
+                            } else if (cycle % 12 == 0 && !verifyDexStructureQuick(appContext, policy.dexIntegrityEntries)) {
                                 triggerMainCrash(mainHandler, /*O*/"DEX integrity violation detected"/*O*/);
                                 return;
                             }
                         }
-                        if (policy.has(FLAG_ANTI_TAMPERING) && (cycle % 10 == 0)) {
-                            if (!verifyApkIntegrity(appContext, policy.integrityEntries)) {
+                        if (policy.has(FLAG_ANTI_TAMPERING)) {
+                            if (!fullIntegrityChecked) {
+                                fullIntegrityChecked = true;
+                                if (!verifyApkIntegrity(appContext, policy.integrityEntries)) {
+                                    triggerMainCrash(mainHandler, /*O*/"APK tampering detected"/*O*/);
+                                    return;
+                                }
+                            } else if (cycle % 12 == 0 && !verifyCriticalApkIntegrity(appContext, policy.integrityEntries, isCoreInitialized(appContext))) {
                                 triggerMainCrash(mainHandler, /*O*/"APK tampering detected"/*O*/);
                                 return;
                             }
@@ -585,6 +608,10 @@ public final class DsProGuardProvider extends ContentProvider {
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
             return;
         }
+        if (shownCertDialogActivityRef.get() == activity) {
+            return;
+        }
+        shownCertDialogActivityRef = new WeakReference<>(activity);
         try {
             new AlertDialog.Builder(activity)
                 .setTitle(/*O*/"Device Certificate Warning"/*O*/)
@@ -697,6 +724,38 @@ public final class DsProGuardProvider extends ContentProvider {
             wipe(salt);
             wipe(keyBytes);
             wipe(plain);
+        }
+    }
+
+    private static boolean verifyDexStructureQuick(Context context, List<String> expectedEntries) {
+        if (context == null || expectedEntries == null || expectedEntries.isEmpty()) {
+            return false;
+        }
+        try (ZipFile apkZip = new ZipFile(context.getPackageCodePath())) {
+            Map<String, Integer> expectedSizes = new HashMap<>(expectedEntries.size());
+            for (String row : expectedEntries) {
+                String[] parts = row.split("\\|", 4);
+                if (parts.length != 4) {
+                    return false;
+                }
+                expectedSizes.put(parts[3].trim(), Integer.parseInt(parts[2].trim()));
+            }
+            int apkDexCount = 0;
+            Enumeration<? extends ZipEntry> entries = apkZip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry e = entries.nextElement();
+                String name = e.getName();
+                if (isRootClassesDex(name)) {
+                    apkDexCount++;
+                    Integer expectedSize = expectedSizes.get(name);
+                    if (expectedSize == null || e.getSize() != expectedSize.longValue()) {
+                        return false;
+                    }
+                }
+            }
+            return apkDexCount == expectedSizes.size();
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -817,16 +876,20 @@ public final class DsProGuardProvider extends ContentProvider {
         }
     }
 
+    private static final char[] HEX_CHARS = "0123456789abcdef".toCharArray();
+
     private static String toLowerHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format(Locale.US, "%02x", b & 0xFF));
+        char[] chars = new char[bytes.length * 2];
+        for (int i = 0; i < bytes.length; i++) {
+            int v = bytes[i] & 0xFF;
+            chars[i * 2] = HEX_CHARS[v >>> 4];
+            chars[i * 2 + 1] = HEX_CHARS[v & 0x0F];
         }
-        return sb.toString();
+        return new String(chars);
     }
 
     private static boolean isMemoryDumpDetected(Context context, boolean deepScan) {
-        if (isDebuggerAttached() || hasSuspiciousJavaThreadNames()) {
+        if (isDebuggerAttached() || hasSuspiciousJavaThreadNames() || hasHookedInstrumentation() || hasVirtualContainerHints(context)) {
             return true;
         }
         if (!deepScan) {
@@ -836,67 +899,77 @@ public final class DsProGuardProvider extends ContentProvider {
             return true;
         }
         boolean checkPkgInMaps = false;
-        if (context != null) {
-            String apkPath = safeLower(context.getPackageCodePath());
-            if (apkPath.contains(/*O*/"/data/data/"/*O*/)
-                || apkPath.contains(/*O*/"/data/user/"/*O*/)
-                || apkPath.contains(/*O*/"/sdcard/"/*O*/)
-                || apkPath.contains(/*O*/"/storage/emulated/"/*O*/)
-                || apkPath.contains(/*O*/"/virtual/"/*O*/)
-                || apkPath.contains(/*O*/"blackbox"/*O*/)
-                || apkPath.contains(/*O*/"blackdex"/*O*/)
-                || apkPath.contains(/*O*/"sandvxposed"/*O*/)
-                || apkPath.contains(/*O*/"dualspace"/*O*/)
-                || apkPath.contains(/*O*/"virtualapp"/*O*/)
-                || apkPath.contains(/*O*/"cloneapp"/*O*/)) {
-                return true;
-            }
-            try {
-                String filesDir = safeLower(context.getFilesDir().getAbsolutePath());
-                if (filesDir.contains(/*O*/"/virtual/"/*O*/)
-                    || filesDir.contains(/*O*/"blackbox"/*O*/)
-                    || filesDir.contains(/*O*/"blackdex"/*O*/)
-                    || filesDir.contains(/*O*/"sandvxposed"/*O*/)
-                    || filesDir.contains(/*O*/"dualspace"/*O*/)
-                    || filesDir.contains(/*O*/"virtualapp"/*O*/)
-                    || filesDir.contains(/*O*/"parallel"/*O*/)
-                    || filesDir.contains(/*O*/"cloneapp"/*O*/)) {
-                    return true;
-                }
-            } catch (Throwable ignored) {
-            }
-            if (!Process.isIsolated()) {
-                String cmdline = readCmdline();
-                if (!cmdline.isEmpty()) {
-                    String lowerCmd = cmdline.toLowerCase(Locale.US);
-                    if (lowerCmd.contains(/*O*/"blackdex"/*O*/)
-                        || lowerCmd.contains(/*O*/"blackbox"/*O*/)
-                        || lowerCmd.contains(/*O*/"virtualapp"/*O*/)
-                        || lowerCmd.contains(/*O*/"io.va."/*O*/)
-                        || lowerCmd.contains(/*O*/"com.lody"/*O*/)
-                        || lowerCmd.contains(/*O*/"sandvxposed"/*O*/)
-                        || lowerCmd.contains(/*O*/"dualspace"/*O*/)
-                        || lowerCmd.contains(/*O*/"parallel"/*O*/)
-                        || lowerCmd.contains(/*O*/"cloneapp"/*O*/)) {
-                        return true;
-                    }
-                    String pkg = context.getPackageName();
-                    if (pkg != null && !pkg.isEmpty() && !cmdline.startsWith(pkg)) {
-                        checkPkgInMaps = true;
-                    }
+        if (context != null && !Process.isIsolated()) {
+            String cmdline = readCmdline();
+            if (!cmdline.isEmpty()) {
+                String pkg = context.getPackageName();
+                if (pkg != null && !pkg.isEmpty() && !cmdline.startsWith(pkg)) {
+                    checkPkgInMaps = true;
                 }
             }
-        }
-        if (hasHookedInstrumentation()) {
-            return true;
         }
         if (scanProcMaps(context != null ? context.getPackageName() : null, checkPkgInMaps)) {
             return true;
         }
         if (containsFridaListeningPort(/*O*/"/proc/net/tcp"/*O*/)
             || containsFridaListeningPort(/*O*/"/proc/net/tcp6"/*O*/)
-            || containsInFile(/*O*/"/proc/net/unix"/*O*/, /*O*/"frida"/*O*/, /*O*/"linjector"/*O*/, /*O*/"hluda"/*O*/, /*O*/"florida"/*O*/, /*O*/"blackdex"/*O*/)) {
+            || containsInFile(/*O*/"/proc/net/unix"/*O*/, /*O*/"frida-agent"/*O*/, /*O*/"frida-server"/*O*/, /*O*/"linjector"/*O*/, /*O*/"libhluda"/*O*/, /*O*/"libflorida"/*O*/, /*O*/"blackdex"/*O*/)) {
             return true;
+        }
+        return false;
+    }
+
+    private static boolean hasVirtualContainerHints(Context context) {
+        if (context == null) {
+            return false;
+        }
+        String apkPath = safeLower(context.getPackageCodePath());
+        if (apkPath.contains(/*O*/"/data/data/"/*O*/)
+            || apkPath.contains(/*O*/"/data/user/"/*O*/)
+            || apkPath.contains(/*O*/"/sdcard/"/*O*/)
+            || apkPath.contains(/*O*/"/storage/emulated/"/*O*/)
+            || apkPath.contains(/*O*/"/virtual/"/*O*/)
+            || apkPath.contains(/*O*/"blackbox"/*O*/)
+            || apkPath.contains(/*O*/"blackdex"/*O*/)
+            || apkPath.contains(/*O*/"sandvxposed"/*O*/)
+            || apkPath.contains(/*O*/"dualspace"/*O*/)
+            || apkPath.contains(/*O*/"virtualapp"/*O*/)
+            || apkPath.contains(/*O*/"cloneapp"/*O*/)) {
+            return true;
+        }
+        try {
+            String filesDir = safeLower(context.getFilesDir().getAbsolutePath());
+            if (filesDir.contains(/*O*/"/virtual/"/*O*/)
+                || filesDir.contains(/*O*/"blackbox"/*O*/)
+                || filesDir.contains(/*O*/"blackdex"/*O*/)
+                || filesDir.contains(/*O*/"sandvxposed"/*O*/)
+                || filesDir.contains(/*O*/"dualspace"/*O*/)
+                || filesDir.contains(/*O*/"virtualapp"/*O*/)
+                || filesDir.contains(/*O*/"com.lbe.parallel"/*O*/)
+                || filesDir.contains(/*O*/"parallel.space"/*O*/)
+                || filesDir.contains(/*O*/"parallel_intl"/*O*/)
+                || filesDir.contains(/*O*/"cloneapp"/*O*/)) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        if (!Process.isIsolated()) {
+            String cmdline = readCmdline();
+            if (!cmdline.isEmpty()) {
+                String lowerCmd = cmdline.toLowerCase(Locale.US);
+                if (lowerCmd.contains(/*O*/"blackdex"/*O*/)
+                    || lowerCmd.contains(/*O*/"blackbox"/*O*/)
+                    || lowerCmd.contains(/*O*/"virtualapp"/*O*/)
+                    || lowerCmd.contains(/*O*/"io.va."/*O*/)
+                    || lowerCmd.contains(/*O*/"com.lody"/*O*/)
+                    || lowerCmd.contains(/*O*/"sandvxposed"/*O*/)
+                    || lowerCmd.contains(/*O*/"dualspace"/*O*/)
+                    || lowerCmd.contains(/*O*/"com.lbe.parallel"/*O*/)
+                    || lowerCmd.contains(/*O*/"parallel.space"/*O*/)
+                    || lowerCmd.contains(/*O*/"cloneapp"/*O*/)) {
+                    return true;
+                }
+            }
         }
         return false;
     }
@@ -995,10 +1068,13 @@ public final class DsProGuardProvider extends ContentProvider {
                     || lower.contains(/*O*/"dexextractor"/*O*/)
                     || lower.contains(/*O*/"frida-agent"/*O*/)
                     || lower.contains(/*O*/"frida-gadget"/*O*/)
+                    || lower.contains(/*O*/"frida-server"/*O*/)
                     || lower.contains(/*O*/"re.frida"/*O*/)
                     || lower.contains(/*O*/"memfd:frida"/*O*/)
-                    || lower.contains(/*O*/"hluda"/*O*/)
-                    || lower.contains(/*O*/"florida"/*O*/)
+                    || lower.contains(/*O*/"libhluda"/*O*/)
+                    || lower.contains(/*O*/"hluda-"/*O*/)
+                    || lower.contains(/*O*/"libflorida"/*O*/)
+                    || lower.contains(/*O*/"florida-"/*O*/)
                     || lower.contains(/*O*/"linjector"/*O*/)
                     || lower.contains(/*O*/"sandhook"/*O*/)
                     || lower.contains(/*O*/"libpine"/*O*/)
@@ -1063,9 +1139,15 @@ public final class DsProGuardProvider extends ContentProvider {
             }
             for (File fd : fds) {
                 String path = safeLower(fd.getCanonicalPath());
-                if (path.contains(/*O*/"frida"/*O*/)
-                    || path.contains(/*O*/"hluda"/*O*/)
-                    || path.contains(/*O*/"florida"/*O*/)
+                if (path.contains(/*O*/"frida-agent"/*O*/)
+                    || path.contains(/*O*/"frida-gadget"/*O*/)
+                    || path.contains(/*O*/"frida-server"/*O*/)
+                    || path.contains(/*O*/"re.frida"/*O*/)
+                    || path.contains(/*O*/"memfd:frida"/*O*/)
+                    || path.contains(/*O*/"libhluda"/*O*/)
+                    || path.contains(/*O*/"hluda-"/*O*/)
+                    || path.contains(/*O*/"libflorida"/*O*/)
+                    || path.contains(/*O*/"florida-"/*O*/)
                     || path.contains(/*O*/"blackdex"/*O*/)
                     || path.contains(/*O*/"blackbox"/*O*/)
                     || path.contains(/*O*/"dumpdex"/*O*/)

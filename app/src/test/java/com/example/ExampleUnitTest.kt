@@ -125,9 +125,15 @@ class ExampleUnitTest {
 
         fun writeStringItem(off: Int, value: String) {
             val raw = value.toByteArray(Charsets.US_ASCII)
-            bytes[off] = raw.size.toByte()
-            System.arraycopy(raw, 0, bytes, off + 1, raw.size)
-            bytes[off + 1 + raw.size] = 0
+            var pos = off
+            var len = raw.size
+            while (len >= 0x80) {
+                bytes[pos++] = ((len and 0x7F) or 0x80).toByte()
+                len = len ushr 7
+            }
+            bytes[pos++] = len.toByte()
+            System.arraycopy(raw, 0, bytes, pos, raw.size)
+            bytes[pos + raw.size] = 0
         }
 
         writeStringItem(str0Off, typeDescriptor)
@@ -772,6 +778,7 @@ class ExampleUnitTest {
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProComponentFactory;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProApplication;"))
         assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProHostClassLoader;"))
+        assertTrue(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/dspro/core/DsProHostClassLoader\$ResourceBridgeClassLoader;"))
         assertFalse(DexPatcher.containsAsciiMarker(coreBytes, "Lcom/stub/StubApp;"))
         assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "isEmulator"))
         assertFalse(DexPatcher.containsAsciiMarker(guardBytes, "XposedBridge"))
@@ -1548,6 +1555,126 @@ class ExampleUnitTest {
         val summary = AxmlManifestPatcher.inspectSecuritySummary(second.manifestBytes)
         assertTrue(summary?.hasGuardProvider == true)
         assertEquals("DS 专业版", summary?.protectionIdentifier)
+    }
+
+    @Test
+    fun `resource or assist encryption without encryptable assets adds zero unnecessary guard or asset files`() {
+        val tempDir = Files.createTempDirectory("dspro_no_unnecessary_assets_test").toFile()
+        try {
+            val inputApk = File(tempDir, "no_assets.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.noassets.app", debuggable = true, allowBackup = true)
+            val appDex = buildSyntheticDex(withDebugInfo = false)
+            val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+            }
+
+            val outApk = File(tempDir, "out_no_assets.apk")
+            val stats = ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = outApk,
+                analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.noassets.app"),
+                config = ProtectionConfig(resourceEncryption = true, assistEncrypt = true),
+                guardDexBytes = guardDex,
+            )
+
+            assertFalse(stats.guardProviderInjected)
+            assertEquals(0, stats.encryptedResourceCount)
+            assertEquals(0, stats.encryptedAssistCount)
+            ZipFile(outApk).use { zip ->
+                val assets = zip.entries().asSequence().filter { it.name.startsWith("assets/") }.toList()
+                assertTrue("Expected zero unnecessary assets/ files, found $assets", assets.isEmpty())
+                assertTrue(zip.getEntry("classes2.dex") == null)
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `baseline prof and profm assets stay unencrypted under assist and resource encryption`() {
+        val tempDir = Files.createTempDirectory("dspro_prof_preserve_test").toFile()
+        try {
+            val inputApk = File(tempDir, "prof_target.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.prof.app", debuggable = true, allowBackup = true)
+            val appDex = buildSyntheticDex(withDebugInfo = false)
+            val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
+            val profBytes = byteArrayOf(0x70, 0x72, 0x6f, 0x00, 0x01, 0x02, 0x03)
+            val profmBytes = byteArrayOf(0x70, 0x72, 0x6d, 0x00, 0x04, 0x05, 0x06)
+            val cfgBytes = """{"feature":"active"}""".toByteArray(Charsets.UTF_8)
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("assets/custom.prof"))
+                zip.write(profBytes)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("assets/custom.profm"))
+                zip.write(profmBytes)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("assets/config.json"))
+                zip.write(cfgBytes)
+                zip.closeEntry()
+            }
+
+            val outApk = File(tempDir, "prof_protected.apk")
+            val stats = ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = outApk,
+                analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.prof.app"),
+                config = ProtectionConfig(assistEncrypt = true, resourceEncryption = true),
+                guardDexBytes = guardDex,
+            )
+
+            assertEquals(1, stats.encryptedAssistCount)
+            assertEquals(1, stats.encryptedResourceCount)
+            ZipFile(outApk).use { zip ->
+                assertArrayEquals(profBytes, zip.getInputStream(zip.getEntry("assets/custom.prof")).readBytes())
+                assertArrayEquals(profmBytes, zip.getInputStream(zip.getEntry("assets/custom.profm")).readBytes())
+                assertTrue(zip.getEntry("assets/config.json") == null)
+                val vaultAssets = decryptResourceVault(zip, "com.prof.app")
+                assertArrayEquals(cfgBytes, vaultAssets["assets/config.json"])
+                assertFalse(vaultAssets.containsKey("assets/custom.prof"))
+                assertFalse(vaultAssets.containsKey("assets/custom.profm"))
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `long multi-block dex string encryption roundtrips losslessly across sha256 block boundaries`() {
+        val longLiteral = "https://edge.dspro.example/v3/tokens/verify?" + "a1b2c3d4e5f6g7h8".repeat(6)
+        assertTrue(longLiteral.length > 96)
+        val rawDex = buildSyntheticDexWithStrings(
+            typeDescriptor = "Lcom/demo/LongStringTest;",
+            secretLiteral = longLiteral,
+        )
+        val strKey = MessageDigest.getInstance("SHA-256").digest("long-str-key".toByteArray())
+        val res = DexPatcher.encryptLiteralStrings(rawDex, strKey)
+        assertEquals(1, res.encryptedStringCount)
+        assertFalse(DexPatcher.containsAsciiMarker(res.encryptedDexBytes, "edge.dspro.example"))
+
+        val inflated = inflatePlain(res.compressedPatchBlob)
+        val restored = res.encryptedDexBytes.copyOf()
+        DataInputStream(ByteArrayInputStream(inflated)).use { pdis ->
+            assertEquals(1, pdis.readInt())
+            val off = pdis.readInt()
+            val len = pdis.readUnsignedShort()
+            assertEquals(longLiteral.length, len)
+            DexPatcher.applyAsciiStreamXor(restored, off, len, strKey)
+        }
+        assertArrayEquals(rawDex, restored)
     }
 }
 
