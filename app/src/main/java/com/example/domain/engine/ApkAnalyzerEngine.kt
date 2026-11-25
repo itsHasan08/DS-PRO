@@ -9,12 +9,15 @@ import android.os.Build
 import android.provider.OpenableColumns
 import com.example.domain.model.ApkAnalysisResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.zip.ZipFile
-import kotlin.math.min
 
 class ApkAnalyzerEngine(private val context: Context) {
 
@@ -31,43 +34,50 @@ class ApkAnalyzerEngine(private val context: Context) {
                 )
             }
 
+            // Purge any prior temporary APKs before copying the newly selected archive
+            workDir.listFiles()?.forEach { it.deleteRecursively() }
+
             val displayName = resolveDisplayName(uri) ?: "selected.apk"
             val sanitizedName = displayName.replace(Regex("[^A-Za-z0-9._-]"), "_")
             val targetFile = File(workDir, "input_${System.currentTimeMillis()}_$sanitizedName")
 
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                java.io.BufferedOutputStream(FileOutputStream(targetFile), 128 * 1024).use { output ->
-                    val buffer = ByteArray(128 * 1024)
-                    var read: Int
-                    while (input.read(buffer).also { read = it } != -1) {
-                        output.write(buffer, 0, read)
+            try {
+                context.contentResolver.openInputStream(uri)?.use { rawInput ->
+                    BufferedInputStream(rawInput, 256 * 1024).use { input ->
+                        BufferedOutputStream(FileOutputStream(targetFile), 256 * 1024).use { output ->
+                            val buffer = ByteArray(256 * 1024)
+                            var read: Int
+                            while (input.read(buffer).also { read = it } != -1) {
+                                currentCoroutineContext().ensureActive()
+                                output.write(buffer, 0, read)
+                            }
+                            output.flush()
+                        }
                     }
-                    output.flush()
+                } ?: error("Could not read selected file.")
+
+                require(targetFile.exists() && targetFile.length() > 64) {
+                    targetFile.delete()
+                    "Selected file is empty or invalid."
                 }
-            } ?: error("Could not read selected file.")
 
-            require(targetFile.exists() && targetFile.length() > 64) {
+                val magic = ByteArray(4)
+                targetFile.inputStream().use { it.read(magic) }
+                require(
+                    magic[0] == 0x50.toByte() &&
+                        magic[1] == 0x4B.toByte() &&
+                        magic[2] == 0x03.toByte() &&
+                        magic[3] == 0x04.toByte()
+                ) {
+                    targetFile.delete()
+                    "Please select a valid .apk file."
+                }
+
+                inspectApkFile(targetFile, displayName)
+            } catch (t: Throwable) {
                 targetFile.delete()
-                "Selected file is empty or invalid."
+                throw t
             }
-
-            val magic = ByteArray(4)
-            targetFile.inputStream().use { it.read(magic) }
-            require(
-                magic[0] == 0x50.toByte() &&
-                    magic[1] == 0x4B.toByte() &&
-                    magic[2] == 0x03.toByte() &&
-                    magic[3] == 0x04.toByte()
-            ) {
-                targetFile.delete()
-                "Please select a valid .apk file."
-            }
-
-            workDir.listFiles()
-                ?.filter { it.name.startsWith("input_") && it.name != targetFile.name }
-                ?.forEach { it.delete() }
-
-            inspectApkFile(targetFile, displayName)
         }
     }
 
@@ -170,12 +180,11 @@ class ApkAnalyzerEngine(private val context: Context) {
 
     @Suppress("DEPRECATION")
     private fun loadPackageArchiveInfo(pm: PackageManager, path: String): PackageInfo? {
-        val sigFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val queryFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             PackageManager.GET_SIGNING_CERTIFICATES
         } else {
             PackageManager.GET_SIGNATURES
         }
-        val queryFlags = sigFlag or PackageManager.GET_META_DATA
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             pm.getPackageArchiveInfo(path, PackageManager.PackageInfoFlags.of(queryFlags.toLong()))
         } else {

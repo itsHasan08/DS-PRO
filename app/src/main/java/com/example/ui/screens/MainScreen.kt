@@ -152,10 +152,12 @@ fun MainScreen(
         label = "refresh_alpha",
     )
 
-    LaunchedEffect(uiState.isProcessing, uiState.runResult) {
+    LaunchedEffect(uiState.isProcessing, uiState.runResult, uiState.selectedApkUri, uiState.isRefreshing) {
         if (uiState.isProcessing || uiState.runResult != null) {
             val lastIdx = (gridState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
             gridState.animateScrollToItem(lastIdx)
+        } else if (!uiState.isRefreshing && uiState.selectedApkUri == null && gridState.firstVisibleItemIndex > 0) {
+            gridState.animateScrollToItem(0)
         }
     }
 
@@ -211,7 +213,7 @@ fun MainScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .widthIn(max = 840.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 14.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
@@ -478,7 +480,7 @@ private val INFO_DETECT_ROOT = ProtectionFeatureInfo(
 
 private val INFO_DETECT_DEBUGGER = ProtectionFeatureInfo(
     id = "detect_debugger",
-    title = "Anti Debug",
+    title = "Detect Debugger",
     fullName = "Active Debugger Detection",
     summary = "Blocks outsiders from attaching debugging tools to your running app.",
     protections = listOf(
@@ -490,7 +492,7 @@ private val INFO_DETECT_DEBUGGER = ProtectionFeatureInfo(
 
 private val INFO_DEVICE_CERTIFICATE = ProtectionFeatureInfo(
     id = "device_certificate",
-    title = "Device Cert",
+    title = "Certificate",
     fullName = "Device Certificate & Play Integrity Check",
     summary = "Checks that Google Play Store is active and the device is properly certified.",
     protections = listOf(
@@ -514,7 +516,7 @@ private val INFO_ANTI_SCREENSHOT = ProtectionFeatureInfo(
 
 private val INFO_ANTI_TAMPERING = ProtectionFeatureInfo(
     id = "anti_tampering",
-    title = "Anti Tamper",
+    title = "Modified Guard",
     fullName = "Anti-Tampering & APK Modification Guard",
     summary = "Prevents your app from being edited, hacked, or turned into a mod APK.",
     protections = listOf(
@@ -574,7 +576,7 @@ private val INFO_DSPRO_ENCRYPT = ProtectionFeatureInfo(
 
 private val INFO_STRING_ENCRYPTION = ProtectionFeatureInfo(
     id = "string_encryption",
-    title = "String Encrypt",
+    title = "String Encryption",
     fullName = "DEX String Literal Encryption",
     summary = "Hides important text inside your app's code from static scanning.",
     protections = listOf(
@@ -586,7 +588,7 @@ private val INFO_STRING_ENCRYPTION = ProtectionFeatureInfo(
 
 private val INFO_CONTROL_FLOW = ProtectionFeatureInfo(
     id = "control_flow_obfuscation",
-    title = "Flow Guard",
+    title = "Obfuscation",
     fullName = "Control Flow Obfuscation",
     summary = "Makes your app's code logic very hard for reverse engineers to follow.",
     protections = listOf(
@@ -598,7 +600,7 @@ private val INFO_CONTROL_FLOW = ProtectionFeatureInfo(
 
 private val INFO_RESOURCE_ENCRYPTION = ProtectionFeatureInfo(
     id = "resource_encryption",
-    title = "Res Encrypt",
+    title = "Resource Encryption",
     fullName = "App Resource & Data Encryption",
     summary = "Protects internal app data and configuration files inside the APK.",
     protections = listOf(
@@ -622,7 +624,7 @@ private val INFO_DISABLE_DEBUGGABLE = ProtectionFeatureInfo(
 
 private val INFO_STRIP_DEX_DEBUG = ProtectionFeatureInfo(
     id = "strip_dex_debug",
-    title = "Strip Debug",
+    title = "Strip DEX Debug",
     fullName = "Strip DEX Debug Information",
     summary = "Removes leftover developer debug clues from the compiled app.",
     protections = listOf(

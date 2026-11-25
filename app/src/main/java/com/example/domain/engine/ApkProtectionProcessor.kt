@@ -161,7 +161,7 @@ class ApkProtectionProcessor(
             }
             steps += ProtectionStepResult(
                 id = "dspro_core",
-                title = "DS PRO & String Encrypt",
+                title = "DS PRO & String Encryption",
                 status = StepStatus.SUCCESS,
                 detail = parts.joinToString(" | "),
             )
@@ -186,10 +186,10 @@ class ApkProtectionProcessor(
         if (config.requiresRuntimeGuard) {
             val guards = buildList {
                 if (config.detectRoot) add("Detect Root")
-                if (config.detectDebugger) add("Anti Debug")
-                if (config.deviceCertificate) add("Device Cert")
+                if (config.detectDebugger) add("Detect Debugger")
+                if (config.deviceCertificate) add("Certificate")
                 if (config.antiScreenshot) add("Screen Guard")
-                if (config.antiTampering) add("Anti Tamper(${stats.integrityCount})")
+                if (config.antiTampering) add("Modified Guard(${stats.integrityCount})")
                 if (config.antiDump) add("Anti Dump")
                 if (config.dexIntegrityProtection) add("DEX Integrity(${stats.dexIntegrityCount})")
             }
@@ -216,13 +216,13 @@ class ApkProtectionProcessor(
 
         if (config.stripDexDebug || config.controlFlowObfuscation || config.resourceEncryption) {
             val binaryParts = buildList {
-                if (config.stripDexDebug) add("Strip Debug (${stats.dexDebugItemsCleared} symbols)")
-                if (config.controlFlowObfuscation) add("Flow Guard (${stats.cfoTransformedUnits} edges / ${stats.cfoMethodsScanned} methods)")
-                if (config.resourceEncryption) add("Res Encrypt (${stats.encryptedResourceCount} assets)")
+                if (config.stripDexDebug) add("Strip DEX Debug (${stats.dexDebugItemsCleared} symbols)")
+                if (config.controlFlowObfuscation) add("Obfuscation (${stats.cfoTransformedUnits} edges / ${stats.cfoMethodsScanned} methods)")
+                if (config.resourceEncryption) add("Resource Encryption (${stats.encryptedResourceCount} assets)")
             }
             steps += ProtectionStepResult(
                 id = "binary",
-                title = "Hardening & Res Encrypt",
+                title = "Hardening & Resource Encryption",
                 status = StepStatus.SUCCESS,
                 detail = binaryParts.joinToString(" | "),
             )
@@ -269,10 +269,11 @@ class ApkProtectionProcessor(
         }
 
     suspend fun clearWorkCache() = withContext(Dispatchers.IO) {
-        runCatching {
-            workDir.listFiles()?.forEach { it.deleteRecursively() }
-        }
-        Unit
+        clearCacheDirectories(
+            workDir = workDir,
+            cacheDir = context.cacheDir,
+            codeCacheDir = context.codeCacheDir,
+        )
     }
 
     companion object {
@@ -289,6 +290,40 @@ class ApkProtectionProcessor(
         fun coreContainerAssetPath(packageName: String): String = CORE_CONTAINER_ASSET
 
         fun resourceVaultAssetPath(packageName: String): String = RESOURCE_VAULT_ASSET
+
+        fun clearCacheDirectories(
+            workDir: File,
+            cacheDir: File? = null,
+            codeCacheDir: File? = null,
+        ) {
+            runCatching {
+                if (workDir.exists()) {
+                    workDir.listFiles()?.forEach { it.deleteRecursively() }
+                }
+            }
+            listOfNotNull(cacheDir, codeCacheDir).forEach { dir ->
+                runCatching {
+                    dir.listFiles()?.forEach { entry ->
+                        val lower = entry.name.lowercase()
+                        val isStaleCache = entry.name == "dspro_work" ||
+                            lower.startsWith("dspro_") ||
+                            lower.startsWith("input_") ||
+                            lower.startsWith("protected_") ||
+                            lower.endsWith(".apk") ||
+                            lower.endsWith(".dex") ||
+                            lower.endsWith(".bin") ||
+                            lower.endsWith(".tmp")
+                        if (isStaleCache) {
+                            if (entry.isDirectory) {
+                                entry.listFiles()?.forEach { it.deleteRecursively() }
+                            } else {
+                                entry.delete()
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         fun transformApkArchive(
             inputFile: File,
@@ -332,8 +367,8 @@ class ApkProtectionProcessor(
             var manifestBytes: ByteArray? = null
 
             ZipFile(inputFile).use { zipIn ->
-                val countingOut = CountingOutputStream(BufferedOutputStream(FileOutputStream(outputFile), 128 * 1024))
-                val copyBuf = ByteArray(64 * 1024)
+                val countingOut = CountingOutputStream(BufferedOutputStream(FileOutputStream(outputFile), 256 * 1024))
+                val copyBuf = ByteArray(256 * 1024)
                 ZipOutputStream(countingOut).use { zipOut ->
                     zipOut.setLevel(4)
                     val written = hashSetOf<String>()

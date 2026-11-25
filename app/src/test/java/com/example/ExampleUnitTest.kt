@@ -1676,6 +1676,40 @@ class ExampleUnitTest {
         }
         assertArrayEquals(rawDex, restored)
     }
+
+    @Test
+    fun `clearCacheDirectories removes all work files and stale apk or temp cache entries`() {
+        val root = Files.createTempDirectory("dspro_cache_clean_test").toFile()
+        try {
+            val cacheDir = File(root, "cache").apply { mkdirs() }
+            val codeCacheDir = File(root, "code_cache").apply { mkdirs() }
+            val workDir = File(cacheDir, "dspro_work").apply { mkdirs() }
+
+            val inputApk = File(workDir, "input_123_demo.apk").apply { writeText("apk") }
+            val protectedApk = File(workDir, "protected_unsigned_demo.apk").apply { writeText("out") }
+            val nestedWork = File(workDir, "nested/sub.bin").apply {
+                parentFile?.mkdirs()
+                writeText("bin")
+            }
+            val staleCacheApk = File(cacheDir, "dspro_temp.apk").apply { writeText("stale") }
+            val staleTmp = File(codeCacheDir, "input_leftover.tmp").apply { writeText("tmp") }
+
+            ApkProtectionProcessor.clearCacheDirectories(
+                workDir = workDir,
+                cacheDir = cacheDir,
+                codeCacheDir = codeCacheDir,
+            )
+
+            assertFalse(inputApk.exists())
+            assertFalse(protectedApk.exists())
+            assertFalse(nestedWork.exists())
+            assertTrue((workDir.listFiles()?.isEmpty() == true))
+            assertFalse(staleCacheApk.exists())
+            assertFalse(staleTmp.exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }
 
 

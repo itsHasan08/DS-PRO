@@ -11,6 +11,8 @@ import com.example.domain.model.ApkAnalysisResult
 import com.example.domain.model.ProtectionConfig
 import com.example.domain.model.ProtectionRunResult
 import com.example.domain.model.ProtectionStepResult
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,13 +55,17 @@ class MainViewModel(
 
     private val _uiState = MutableStateFlow(DsProUiState())
     val uiState: StateFlow<DsProUiState> = _uiState.asStateFlow()
+    private var apkLoadJob: Job? = null
 
     fun onApkUriSelected(uri: Uri) {
-        viewModelScope.launch {
+        if (_uiState.value.isProcessing) return
+        apkLoadJob?.cancel()
+        apkLoadJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     selectedApkUri = uri.toString(),
                     isLoadingApk = true,
+                    selectedApk = null,
                     apkError = null,
                     runResult = null,
                     steps = emptyList(),
@@ -69,7 +75,8 @@ class MainViewModel(
                     exportedSizeBytes = null,
                 )
             }
-            analyzerEngine.loadApkFromUri(uri)
+            val loadResult = analyzerEngine.loadApkFromUri(uri)
+            loadResult
                 .onSuccess { result ->
                     _uiState.update {
                         it.copy(
@@ -80,6 +87,7 @@ class MainViewModel(
                     }
                 }
                 .onFailure { err ->
+                    if (err is CancellationException) throw err
                     _uiState.update {
                         it.copy(
                             selectedApkUri = null,
@@ -98,87 +106,23 @@ class MainViewModel(
 
     fun refreshWorkspace() {
         val currentState = _uiState.value
-        if (currentState.isProcessing || currentState.isLoadingApk || currentState.isRefreshing) return
+        if (currentState.isProcessing || currentState.isRefreshing) return
+
+        apkLoadJob?.cancel()
+        apkLoadJob = null
 
         viewModelScope.launch {
             val startedAt = System.currentTimeMillis()
-            if (currentState.isExported) {
-                _uiState.update { it.copy(isRefreshing = true) }
-                protectionProcessor.clearWorkCache()
-                val elapsed = System.currentTimeMillis() - startedAt
-                if (elapsed < 420L) {
-                    delay(420L - elapsed)
-                }
-                _uiState.value = DsProUiState(
-                    isRefreshing = false,
-                    statusMessage = "Workspace reset for a new APK",
-                )
-                return@launch
-            }
-
-            val uriStr = currentState.selectedApkUri
-            _uiState.update {
-                it.copy(
-                    isRefreshing = true,
-                    apkError = null,
-                    progress = 0,
-                    activeStageDetail = null,
-                    steps = emptyList(),
-                    runResult = null,
-                    isExported = false,
-                    exportedSizeBytes = null,
-                )
-            }
-
-            if (uriStr == null) {
-                delay(420L)
-                _uiState.update {
-                    it.copy(
-                        isRefreshing = false,
-                        statusMessage = "Workspace refreshed",
-                    )
-                }
-                return@launch
-            }
-
-            val parsedUri = runCatching { Uri.parse(uriStr) }.getOrNull()
-            if (parsedUri == null) {
-                delay(420L)
-                _uiState.update {
-                    it.copy(
-                        isRefreshing = false,
-                        statusMessage = "Workspace refreshed",
-                    )
-                }
-                return@launch
-            }
-
-            val reloadResult = analyzerEngine.loadApkFromUri(parsedUri)
+            _uiState.update { it.copy(isRefreshing = true) }
+            protectionProcessor.clearWorkCache()
             val elapsed = System.currentTimeMillis() - startedAt
-            if (elapsed < 420L) {
-                delay(420L - elapsed)
+            if (elapsed < 60L) {
+                delay(60L - elapsed)
             }
-
-            reloadResult
-                .onSuccess { result ->
-                    _uiState.update {
-                        it.copy(
-                            isRefreshing = false,
-                            selectedApk = result,
-                            apkError = null,
-                            statusMessage = "Reloaded ${result.fileName}",
-                        )
-                    }
-                }
-                .onFailure { err ->
-                    _uiState.update {
-                        it.copy(
-                            isRefreshing = false,
-                            apkError = err.message ?: "Failed to reload APK.",
-                            statusMessage = "Reload failed",
-                        )
-                    }
-                }
+            _uiState.value = DsProUiState(
+                isRefreshing = false,
+                statusMessage = "Workspace reset",
+            )
         }
     }
 

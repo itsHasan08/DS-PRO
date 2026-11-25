@@ -1,6 +1,5 @@
 package com.example.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -8,12 +7,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,12 +66,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
@@ -81,6 +79,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
@@ -171,8 +170,12 @@ fun DsProTopBar(
                 Box(
                     modifier = Modifier
                         .heightIn(min = 48.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable(role = Role.Button, onClick = onInfoClick)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            role = Role.Button,
+                            onClick = onInfoClick,
+                        )
                         .padding(horizontal = 4.dp)
                         .testTag("top_bar_info_button"),
                     contentAlignment = Alignment.Center,
@@ -371,7 +374,7 @@ fun GridToggleTile(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 58.dp)
-                .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                .padding(start = 9.dp, end = 2.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -384,9 +387,7 @@ fun GridToggleTile(
                 color = CharcoalText,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(end = 2.dp),
+                modifier = Modifier.weight(1f),
             )
             IconButton(
                 onClick = onInfoClick,
@@ -402,13 +403,13 @@ fun GridToggleTile(
                 )
             }
             Box(
-                modifier = Modifier.size(width = 40.dp, height = 48.dp),
+                modifier = Modifier.size(width = 38.dp, height = 48.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Switch(
                     checked = checked,
                     onCheckedChange = onCheckedChange,
-                    modifier = Modifier.scale(0.74f),
+                    modifier = Modifier.scale(0.72f),
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = PureWhite,
                         checkedTrackColor = accentColor,
@@ -452,11 +453,6 @@ fun ProtectionPipelineCard(
         isComplete -> SuccessTint
         else -> ProBlueTint
     }
-    val animatedProgress by animateFloatAsState(
-        targetValue = (progress.coerceIn(0, 100)) / 100f,
-        animationSpec = tween(durationMillis = 240),
-        label = "pipeline_progress",
-    )
 
     var elapsedMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(isProcessing) {
@@ -464,48 +460,11 @@ fun ProtectionPipelineCard(
             val started = System.currentTimeMillis()
             elapsedMs = 0L
             while (true) {
-                delay(100L)
+                delay(250L)
                 elapsedMs = System.currentTimeMillis() - started
             }
         }
     }
-
-    val infiniteTransition = rememberInfiniteTransition(label = "pipeline_live")
-    val orbitAngle by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = LinearEasing),
-        ),
-        label = "orbit_angle",
-    )
-    val radarWave by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1400, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "radar_wave",
-    )
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 0.94f,
-        targetValue = 1.07f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 750),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "pulse_scale",
-    )
-    val shimmerOffset by infiniteTransition.animateFloat(
-        initialValue = -0.35f,
-        targetValue = 1.35f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1100, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "progress_shimmer",
-    )
 
     val phaseIndex = when {
         hasFailure -> -1
@@ -546,55 +505,12 @@ fun ProtectionPipelineCard(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier.weight(1f),
                         ) {
-                            Box(
-                                modifier = Modifier.size(46.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                if (isProcessing) {
-                                    Canvas(modifier = Modifier.fillMaxSize()) {
-                                        val maxR = size.minDimension / 2f
-                                        val r1 = (maxR * 0.56f) + (maxR * 0.44f * radarWave)
-                                        drawCircle(
-                                            color = accentColor.copy(alpha = (1f - radarWave) * 0.42f),
-                                            radius = r1,
-                                            style = Stroke(width = 2.dp.toPx()),
-                                        )
-                                        drawArc(
-                                            color = TealAccent,
-                                            startAngle = orbitAngle,
-                                            sweepAngle = 115f,
-                                            useCenter = false,
-                                            style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round),
-                                        )
-                                        drawArc(
-                                            color = ProBlue,
-                                            startAngle = orbitAngle + 180f,
-                                            sweepAngle = 80f,
-                                            useCenter = false,
-                                            style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round),
-                                        )
-                                    }
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .scale(if (isProcessing) pulseScale else 1f)
-                                        .clip(CircleShape)
-                                        .background(PureWhite),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Icon(
-                                        imageVector = when {
-                                            hasFailure -> Icons.Filled.Error
-                                            isComplete -> Icons.Filled.VerifiedUser
-                                            else -> Icons.Filled.Lock
-                                        },
-                                        contentDescription = null,
-                                        tint = accentColor,
-                                        modifier = Modifier.size(19.dp),
-                                    )
-                                }
-                            }
+                            OrbitalShieldBadge(
+                                isProcessing = isProcessing,
+                                hasFailure = hasFailure,
+                                isComplete = isComplete,
+                                accentColor = accentColor,
+                            )
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -610,13 +526,7 @@ fun ProtectionPipelineCard(
                                         color = CharcoalText,
                                     )
                                     if (isProcessing) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(7.dp)
-                                                .alpha(if (pulseScale > 1f) 1f else 0.45f)
-                                                .clip(CircleShape)
-                                                .background(TealAccent),
-                                        )
+                                        LivePulseDot()
                                     }
                                 }
                                 Text(
@@ -651,43 +561,12 @@ fun ProtectionPipelineCard(
                         }
                     }
 
-                    // Live Dual-Accent Wave Progress Track
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(10.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(PureWhite.copy(alpha = 0.88f)),
-                    ) {
-                        val fillFraction = animatedProgress.coerceIn(0f, 1f)
-                        if (fillFraction > 0f) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth(fillFraction)
-                                    .fillMaxHeight()
-                                    .clip(RoundedCornerShape(50))
-                                    .background(
-                                        brush = if (isProcessing) {
-                                            Brush.linearGradient(
-                                                colors = listOf(
-                                                    ProBlue,
-                                                    TealAccent,
-                                                    PureWhite.copy(alpha = 0.85f),
-                                                    TealAccent,
-                                                    ProBlueDark,
-                                                ),
-                                                start = Offset(shimmerOffset * 600f - 180f, 0f),
-                                                end = Offset(shimmerOffset * 600f + 180f, 0f),
-                                            )
-                                        } else {
-                                            Brush.horizontalGradient(
-                                                colors = listOf(accentColor, secondaryAccent),
-                                            )
-                                        },
-                                    ),
-                            )
-                        }
-                    }
+                    ShimmerProgressBar(
+                        progress = progress,
+                        isProcessing = isProcessing,
+                        accentColor = accentColor,
+                        secondaryAccent = secondaryAccent,
+                    )
 
                     // Compact 5-Stage Pipeline Stepper
                     Row(
@@ -712,7 +591,7 @@ fun ProtectionPipelineCard(
                                 shape = RoundedCornerShape(8.dp),
                                 color = chipBg,
                                 border = if (active) {
-                                    BorderStroke(1.2.dp, ProBlue.copy(alpha = if (pulseScale > 1f) 0.9f else 0.45f))
+                                    BorderStroke(1.2.dp, ProBlue.copy(alpha = 0.75f))
                                 } else {
                                     null
                                 },
@@ -742,10 +621,7 @@ fun ProtectionPipelineCard(
                         .padding(horizontal = 14.dp, vertical = 12.dp),
                 ) {
                     steps.forEachIndexed { index, step ->
-                        AnimatedVisibility(
-                            visible = true,
-                            enter = fadeIn(tween(180)) + slideInVertically { it / 4 },
-                        ) {
+                        key(step.id) {
                             PipelineTimelineStep(
                                 step = step,
                                 isLast = !isProcessing && index == steps.lastIndex,
@@ -841,9 +717,202 @@ fun ProtectionPipelineCard(
 }
 
 @Composable
+private fun OrbitalShieldBadge(
+    isProcessing: Boolean,
+    hasFailure: Boolean,
+    isComplete: Boolean,
+    accentColor: Color,
+) {
+    Box(
+        modifier = Modifier.size(46.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (isProcessing) {
+            val infiniteTransition = rememberInfiniteTransition(label = "orbital_badge")
+            val orbitAngle = infiniteTransition.animateFloat(
+                initialValue = 0f,
+                targetValue = 360f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 1200, easing = LinearEasing),
+                ),
+                label = "orbit_angle",
+            )
+            val radarWave = infiniteTransition.animateFloat(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 1400, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart,
+                ),
+                label = "radar_wave",
+            )
+            val pulseScale = infiniteTransition.animateFloat(
+                initialValue = 0.94f,
+                targetValue = 1.07f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 750),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+                label = "pulse_scale",
+            )
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val maxR = size.minDimension / 2f
+                val wave = radarWave.value
+                val angle = orbitAngle.value
+                val r1 = (maxR * 0.56f) + (maxR * 0.44f * wave)
+                drawCircle(
+                    color = accentColor.copy(alpha = (1f - wave) * 0.42f),
+                    radius = r1,
+                    style = Stroke(width = 2.dp.toPx()),
+                )
+                drawArc(
+                    color = TealAccent,
+                    startAngle = angle,
+                    sweepAngle = 115f,
+                    useCenter = false,
+                    style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round),
+                )
+                drawArc(
+                    color = ProBlue,
+                    startAngle = angle + 180f,
+                    sweepAngle = 80f,
+                    useCenter = false,
+                    style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round),
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .graphicsLayer {
+                        val s = pulseScale.value
+                        scaleX = s
+                        scaleY = s
+                    }
+                    .clip(CircleShape)
+                    .background(PureWhite),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Lock,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(PureWhite),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = when {
+                        hasFailure -> Icons.Filled.Error
+                        isComplete -> Icons.Filled.VerifiedUser
+                        else -> Icons.Filled.Lock
+                    },
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LivePulseDot() {
+    val infiniteTransition = rememberInfiniteTransition(label = "live_dot")
+    val dotAlpha = infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 700),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dot_alpha",
+    )
+    Box(
+        modifier = Modifier
+            .size(7.dp)
+            .graphicsLayer { alpha = dotAlpha.value }
+            .clip(CircleShape)
+            .background(TealAccent),
+    )
+}
+
+@Composable
+private fun ShimmerProgressBar(
+    progress: Int,
+    isProcessing: Boolean,
+    accentColor: Color,
+    secondaryAccent: Color,
+) {
+    val animatedProgress by animateFloatAsState(
+        targetValue = (progress.coerceIn(0, 100)) / 100f,
+        animationSpec = tween(durationMillis = 220),
+        label = "pipeline_progress",
+    )
+    val shimmerOffset = if (isProcessing) {
+        rememberInfiniteTransition(label = "bar_shimmer").animateFloat(
+            initialValue = -0.35f,
+            targetValue = 1.35f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1100, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "progress_shimmer",
+        )
+    } else {
+        null
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(10.dp)
+            .clip(RoundedCornerShape(50))
+            .background(PureWhite.copy(alpha = 0.88f)),
+    ) {
+        val fillFraction = animatedProgress.coerceIn(0f, 1f)
+        if (fillFraction > 0f) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth(fillFraction)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(50)),
+            ) {
+                val brush = if (shimmerOffset != null) {
+                    val shift = shimmerOffset.value * size.width
+                    Brush.linearGradient(
+                        colors = listOf(
+                            ProBlue,
+                            TealAccent,
+                            PureWhite.copy(alpha = 0.85f),
+                            TealAccent,
+                            ProBlueDark,
+                        ),
+                        start = Offset(shift - 180f, 0f),
+                        end = Offset(shift + 180f, 0f),
+                    )
+                } else {
+                    Brush.horizontalGradient(
+                        colors = listOf(accentColor, secondaryAccent),
+                    )
+                }
+                drawRect(brush = brush)
+            }
+        }
+    }
+}
+
+@Composable
 private fun LiveActiveTimelineRow(detail: String) {
     val liveTransition = rememberInfiniteTransition(label = "live_row")
-    val haloAlpha by liveTransition.animateFloat(
+    val haloAlpha = liveTransition.animateFloat(
         initialValue = 0.28f,
         targetValue = 0.9f,
         animationSpec = infiniteRepeatable(
@@ -867,7 +936,7 @@ private fun LiveActiveTimelineRow(detail: String) {
             Box(
                 modifier = Modifier
                     .size(22.dp)
-                    .alpha(haloAlpha)
+                    .graphicsLayer { alpha = haloAlpha.value }
                     .clip(CircleShape)
                     .background(ProBlueTint),
             )
@@ -903,7 +972,7 @@ private fun LiveActiveTimelineRow(detail: String) {
                         text = "LIVE",
                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                         color = TealAccent,
-                        modifier = Modifier.alpha(haloAlpha),
+                        modifier = Modifier.graphicsLayer { alpha = haloAlpha.value },
                     )
                 }
             }
