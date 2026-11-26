@@ -78,7 +78,6 @@ import com.example.ui.components.GridGroupHeader
 import com.example.ui.components.GridToggleTile
 import com.example.ui.components.KeyValueLine
 import com.example.ui.components.ProtectionPipelineCard
-import com.example.ui.components.SaveCompleteDialog
 import com.example.ui.components.SectionCard
 import com.example.ui.components.StatusPill
 import com.example.ui.theme.BorderSubtle
@@ -178,15 +177,6 @@ fun MainScreen(
 
     if (showDeveloperInfo) {
         DeveloperInfoDialog(onDismiss = { showDeveloperInfo = false })
-    }
-
-    if (uiState.showSaveCompleteDialog && uiState.isExported) {
-        SaveCompleteDialog(
-            fileName = uiState.exportedFileName ?: "Protected APK",
-            folderLabel = uiState.exportedFolderLabel ?: "Device Storage",
-            sizeBytes = uiState.exportedSizeBytes ?: (uiState.runResult?.outputSizeBytes ?: 0L),
-            onDismiss = { viewModel.dismissSaveCompleteDialog() },
-        )
     }
 
     Box(modifier = Modifier.fillMaxSize()) {

@@ -44,7 +44,6 @@ data class DsProUiState(
     val exportedSizeBytes: Long? = null,
     val exportedFileName: String? = null,
     val exportedFolderLabel: String? = null,
-    val showSaveCompleteDialog: Boolean = false,
     val statusMessage: String? = null,
     val toastEvent: ToastEvent? = null,
 ) {
@@ -93,7 +92,6 @@ class MainViewModel(
                     exportedSizeBytes = null,
                     exportedFileName = null,
                     exportedFolderLabel = null,
-                    showSaveCompleteDialog = false,
                 )
             }
             val loadResult = analyzerEngine.loadApkFromUri(uri)
@@ -172,7 +170,6 @@ class MainViewModel(
                     exportedSizeBytes = null,
                     exportedFileName = null,
                     exportedFolderLabel = null,
-                    showSaveCompleteDialog = false,
                 )
             }
             val result = protectionProcessor.processApk(apk, state.config) { pct, stageDetail, steps ->
@@ -191,7 +188,7 @@ class MainViewModel(
                     activeStageDetail = result.summary,
                     steps = result.steps,
                     runResult = result,
-                    toastEvent = nextToast(result.summary),
+                    toastEvent = if (result.isValidBuild) null else nextToast(result.summary),
                 )
             }
         }
@@ -202,14 +199,13 @@ class MainViewModel(
         viewModelScope.launch {
             protectionProcessor.exportUnsignedApkDetailed(path, destinationUri)
                 .onSuccess { info ->
-                    val toastMsg = "Save Complete! ${info.fileName} (${formatBytes(info.sizeBytes)})"
+                    val toastMsg = "APK saved (${formatBytes(info.sizeBytes)})"
                     _uiState.update {
                         it.copy(
                             isExported = true,
                             exportedSizeBytes = info.sizeBytes,
                             exportedFileName = info.fileName,
                             exportedFolderLabel = info.folderLabel,
-                            showSaveCompleteDialog = true,
                             statusMessage = toastMsg,
                             toastEvent = nextToast(toastMsg),
                         )
@@ -221,10 +217,6 @@ class MainViewModel(
                     }
                 }
         }
-    }
-
-    fun dismissSaveCompleteDialog() {
-        _uiState.update { it.copy(showSaveCompleteDialog = false) }
     }
 
     fun consumeToastEvent(eventId: Long) {

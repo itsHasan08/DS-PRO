@@ -243,7 +243,7 @@ class ApkProtectionProcessor(
         }
 
         val finalMessage = if (valid) {
-            "Ready to save (${formatBytes(outputFile.length())})"
+            "Protection applied (${formatBytes(outputFile.length())})"
         } else {
             verifyDetail
         }
