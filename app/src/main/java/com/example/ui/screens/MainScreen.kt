@@ -1,8 +1,5 @@
 package com.example.ui.screens
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
@@ -22,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,8 +32,6 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Security
@@ -65,13 +61,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.engine.formatBytes
 import com.example.domain.model.ProtectionConfig
@@ -88,7 +81,6 @@ import com.example.ui.components.ProtectionPipelineCard
 import com.example.ui.components.SaveCompleteDialog
 import com.example.ui.components.SectionCard
 import com.example.ui.components.StatusPill
-import com.example.ui.components.StoragePermissionDialog
 import com.example.ui.theme.BorderSubtle
 import com.example.ui.theme.CharcoalText
 import com.example.ui.theme.ErrorRed
@@ -119,7 +111,6 @@ fun MainScreen(
     viewModel: MainViewModel,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var activeInfoDialog by remember { mutableStateOf<Pair<ProtectionFeatureInfo, Boolean>?>(null) }
     var showDeveloperInfo by remember { mutableStateOf(false) }
@@ -139,37 +130,6 @@ fun MainScreen(
     ) { uri ->
         if (uri != null) {
             viewModel.exportUnsignedApk(uri)
-        }
-    }
-
-    val storageTreeLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree(),
-    ) { treeUri ->
-        viewModel.onStorageTreeSelected(treeUri)
-    }
-
-    val legacyStorageLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        viewModel.onLegacyStoragePermissionResult(granted)
-        storageTreeLauncher.launch(null)
-    }
-
-    val requestStoragePermissionFlow = remember(context, legacyStorageLauncher, storageTreeLauncher) {
-        {
-            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
-                val hasLegacy = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                ) == PackageManager.PERMISSION_GRANTED
-                if (!hasLegacy) {
-                    legacyStorageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                } else {
-                    storageTreeLauncher.launch(null)
-                }
-            } else {
-                storageTreeLauncher.launch(null)
-            }
         }
     }
 
@@ -218,16 +178,6 @@ fun MainScreen(
 
     if (showDeveloperInfo) {
         DeveloperInfoDialog(onDismiss = { showDeveloperInfo = false })
-    }
-
-    if (uiState.showStoragePermissionPrompt) {
-        StoragePermissionDialog(
-            onGrantClick = {
-                viewModel.dismissStoragePermissionPrompt()
-                requestStoragePermissionFlow()
-            },
-            onDismiss = { viewModel.dismissStoragePermissionPrompt() },
-        )
     }
 
     if (uiState.showSaveCompleteDialog && uiState.isExported) {
@@ -295,43 +245,6 @@ fun MainScreen(
                             icon = Icons.Filled.FolderOpen,
                             accentColor = ProBlue,
                             accentTint = ProBlueTint,
-                            headerAction = {
-                                val folderGranted = uiState.hasPersistedFolder
-                                Surface(
-                                    onClick = { requestStoragePermissionFlow() },
-                                    shape = RoundedCornerShape(50),
-                                    color = if (folderGranted) SuccessTint else WarningTint,
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (folderGranted) SuccessEmerald.copy(alpha = 0.35f) else WarningAmber.copy(alpha = 0.45f),
-                                    ),
-                                    modifier = Modifier.testTag("storage_permission_chip"),
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = if (folderGranted) Icons.Filled.CheckCircle else Icons.Filled.Folder,
-                                            contentDescription = "Select storage permission",
-                                            tint = if (folderGranted) SuccessEmerald else WarningAmber,
-                                            modifier = Modifier.size(13.dp),
-                                        )
-                                        Text(
-                                            text = if (folderGranted) {
-                                                uiState.storageFolderLabel ?: "Storage Allowed"
-                                            } else {
-                                                "Allow Storage"
-                                            },
-                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                                            color = if (folderGranted) SuccessEmerald else WarningAmber,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                }
-                            },
                         ) {
                             Button(
                                 onClick = {
@@ -559,16 +472,7 @@ fun MainScreen(
                                     exportedFolderLabel = uiState.exportedFolderLabel,
                                     onExportClick = {
                                         val pkg = uiState.selectedApk?.packageName ?: "app"
-                                        if (uiState.hasPersistedFolder) {
-                                            viewModel.saveToGrantedStorageFolder(
-                                                onNeedDocumentPickerFallback = {
-                                                    exportLauncher.launch("${pkg}_dspro_protected.apk")
-                                                },
-                                            )
-                                        } else {
-                                            viewModel.preparePendingSaveAndRequestStorage()
-                                            requestStoragePermissionFlow()
-                                        }
+                                        exportLauncher.launch("${pkg}_dspro_protected.apk")
                                     },
                                 )
                             }
@@ -580,7 +484,10 @@ fun MainScreen(
         }
         CenteredToastHost(
             hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.Center),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 18.dp),
         )
     }
 }

@@ -1,15 +1,9 @@
 package com.example.domain.engine
 
-import android.Manifest
 import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
-import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.compose.runtime.Immutable
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
@@ -23,111 +17,7 @@ data class ExportedApkInfo(
     val sizeBytes: Long,
 )
 
-@Immutable
-data class StorageAccessStatus(
-    val hasAccess: Boolean,
-    val hasPersistedFolder: Boolean,
-    val folderLabel: String?,
-)
-
 class ApkFileStorageService(private val context: Context) {
-
-    private val prefs by lazy {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    }
-
-    fun getPersistedStorageTreeUri(): Uri? {
-        val raw = prefs.getString(KEY_STORAGE_TREE_URI, null) ?: return null
-        val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
-        val granted = context.contentResolver.persistedUriPermissions.any {
-            it.uri == uri && it.isReadPermission && it.isWritePermission
-        }
-        if (!granted) {
-            prefs.edit().remove(KEY_STORAGE_TREE_URI).apply()
-            return null
-        }
-        return uri
-    }
-
-    fun saveStorageTreeUri(treeUri: Uri): StorageAccessStatus {
-        runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                treeUri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-            )
-        }
-        prefs.edit().putString(KEY_STORAGE_TREE_URI, treeUri.toString()).apply()
-        return getStorageAccessStatus()
-    }
-
-    fun clearPersistedStorageTreeUri() {
-        prefs.edit().remove(KEY_STORAGE_TREE_URI).apply()
-    }
-
-    fun getStorageAccessStatus(): StorageAccessStatus {
-        val treeUri = getPersistedStorageTreeUri()
-        val folderLabel = treeUri?.let { extractFolderLabel(it) }
-        val hasLegacy = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            false
-        }
-        return StorageAccessStatus(
-            hasAccess = treeUri != null || hasLegacy,
-            hasPersistedFolder = treeUri != null,
-            folderLabel = folderLabel,
-        )
-    }
-
-    suspend fun exportToGrantedStorageFolder(
-        sourceApk: File,
-        fileName: String,
-    ): Result<ExportedApkInfo> = withContext(Dispatchers.IO) {
-        runCatching {
-            require(sourceApk.exists() && sourceApk.length() > 0L) {
-                "No valid protected APK build available to export."
-            }
-            val treeUri = getPersistedStorageTreeUri()
-                ?: error("Storage folder permission not granted.")
-            val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
-            val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, treeDocId)
-            val createdUri = DocumentsContract.createDocument(
-                context.contentResolver,
-                parentDocUri,
-                APK_MIME_TYPE,
-                fileName,
-            ) ?: error("Could not create APK file in selected folder.")
-
-            try {
-                context.contentResolver.openOutputStream(createdUri)?.use { rawOut ->
-                    BufferedOutputStream(rawOut, 256 * 1024).use { out ->
-                        BufferedInputStream(sourceApk.inputStream(), 256 * 1024).use { input ->
-                            val buf = ByteArray(256 * 1024)
-                            var read: Int
-                            while (input.read(buf).also { read = it } != -1) {
-                                out.write(buf, 0, read)
-                            }
-                        }
-                        out.flush()
-                    }
-                } ?: error("Cannot write to selected storage folder.")
-            } catch (t: Throwable) {
-                runCatching { DocumentsContract.deleteDocument(context.contentResolver, createdUri) }
-                throw t
-            }
-
-            val savedName = resolveDisplayName(createdUri) ?: fileName
-            val folderLabel = extractFolderLabel(treeUri)
-            ExportedApkInfo(
-                fileName = savedName,
-                folderLabel = folderLabel,
-                sizeBytes = sourceApk.length(),
-            )
-        }
-    }
 
     suspend fun exportCopyWithDetailsToUri(
         sourceApk: File,
@@ -153,7 +43,7 @@ class ApkFileStorageService(private val context: Context) {
             val savedName = resolveDisplayName(destinationUri) ?: sourceApk.name
             ExportedApkInfo(
                 fileName = savedName,
-                folderLabel = "Device Storage",
+                folderLabel = "Selected Storage",
                 sizeBytes = sourceApk.length(),
             )
         }
@@ -178,21 +68,9 @@ class ApkFileStorageService(private val context: Context) {
         }.getOrNull()
     }
 
-    private fun extractFolderLabel(treeUri: Uri): String {
-        val docId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull().orEmpty()
-        val afterColon = docId.substringAfter(':', docId).trim('/')
-        return when {
-            afterColon.isNotBlank() -> afterColon
-            docId.equals("primary:", ignoreCase = true) || docId.equals("primary", ignoreCase = true) -> "Internal Storage"
-            else -> "Selected Folder"
-        }
-    }
-
     companion object {
         const val PROTECTED_FOLDER_NAME = "DS_PRO_Protected"
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
-        private const val PREFS_NAME = "dspro_storage_prefs"
-        private const val KEY_STORAGE_TREE_URI = "persisted_storage_tree_uri"
 
         fun buildProtectedFileName(
             packageName: String,

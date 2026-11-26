@@ -60,7 +60,6 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         negotiateHighestSupportedRefreshRate()
         displayManager?.registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
-        viewModel.refreshStoragePermissionState()
     }
 
     override fun onPause() {

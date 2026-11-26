@@ -6,7 +6,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.domain.engine.ApkAnalyzerEngine
-import com.example.domain.engine.ApkFileStorageService
 import com.example.domain.engine.ApkProtectionProcessor
 import com.example.domain.engine.formatBytes
 import com.example.domain.model.ApkAnalysisResult
@@ -46,10 +45,6 @@ data class DsProUiState(
     val exportedFileName: String? = null,
     val exportedFolderLabel: String? = null,
     val showSaveCompleteDialog: Boolean = false,
-    val hasStorageAccess: Boolean = false,
-    val hasPersistedFolder: Boolean = false,
-    val storageFolderLabel: String? = null,
-    val showStoragePermissionPrompt: Boolean = false,
     val statusMessage: String? = null,
     val toastEvent: ToastEvent? = null,
 ) {
@@ -74,91 +69,10 @@ class MainViewModel(
     val uiState: StateFlow<DsProUiState> = _uiState.asStateFlow()
     private var apkLoadJob: Job? = null
     private var toastSequence: Long = 1L
-    private var pendingSaveAfterPermission: Boolean = false
-
-    init {
-        val status = runCatching { protectionProcessor.getStorageAccessStatus() }.getOrNull()
-        if (status != null) {
-            _uiState.update {
-                it.copy(
-                    hasStorageAccess = status.hasAccess,
-                    hasPersistedFolder = status.hasPersistedFolder,
-                    storageFolderLabel = status.folderLabel,
-                    showStoragePermissionPrompt = !status.hasAccess,
-                )
-            }
-        }
-    }
 
     private fun nextToast(message: String): ToastEvent {
         toastSequence += 1L
         return ToastEvent(id = toastSequence, message = message)
-    }
-
-    fun refreshStoragePermissionState() {
-        val status = runCatching { protectionProcessor.getStorageAccessStatus() }.getOrNull() ?: return
-        _uiState.update {
-            it.copy(
-                hasStorageAccess = status.hasAccess,
-                hasPersistedFolder = status.hasPersistedFolder,
-                storageFolderLabel = status.folderLabel,
-            )
-        }
-    }
-
-    fun openStoragePermissionPrompt(forPendingSave: Boolean = false) {
-        pendingSaveAfterPermission = forPendingSave
-        _uiState.update { it.copy(showStoragePermissionPrompt = true) }
-    }
-
-    fun preparePendingSaveAndRequestStorage() {
-        pendingSaveAfterPermission = true
-    }
-
-    fun dismissStoragePermissionPrompt() {
-        pendingSaveAfterPermission = false
-        _uiState.update { it.copy(showStoragePermissionPrompt = false) }
-    }
-
-    fun onStorageTreeSelected(treeUri: Uri?) {
-        if (treeUri == null) {
-            pendingSaveAfterPermission = false
-            _uiState.update {
-                it.copy(
-                    showStoragePermissionPrompt = false,
-                    toastEvent = nextToast("Storage folder selection cancelled"),
-                )
-            }
-            return
-        }
-        val status = protectionProcessor.saveStorageTreePermission(treeUri)
-        val shouldAutoSave = pendingSaveAfterPermission
-        pendingSaveAfterPermission = false
-        _uiState.update {
-            it.copy(
-                hasStorageAccess = status.hasAccess,
-                hasPersistedFolder = status.hasPersistedFolder,
-                storageFolderLabel = status.folderLabel,
-                showStoragePermissionPrompt = false,
-                toastEvent = if (!shouldAutoSave) {
-                    nextToast("Storage permission granted (${status.folderLabel ?: "Selected Folder"})")
-                } else {
-                    it.toastEvent
-                },
-            )
-        }
-        if (shouldAutoSave) {
-            saveToGrantedStorageFolder()
-        }
-    }
-
-    fun onLegacyStoragePermissionResult(granted: Boolean) {
-        refreshStoragePermissionState()
-        if (!granted) {
-            _uiState.update {
-                it.copy(toastEvent = nextToast("Select a folder to grant storage permission"))
-            }
-        }
     }
 
     fun onApkUriSelected(uri: Uri) {
@@ -217,23 +131,18 @@ class MainViewModel(
 
         apkLoadJob?.cancel()
         apkLoadJob = null
-        pendingSaveAfterPermission = false
 
         viewModelScope.launch {
             val startedAt = System.currentTimeMillis()
             _uiState.update { it.copy(isRefreshing = true) }
             protectionProcessor.clearWorkCache()
-            val storageStatus = runCatching { protectionProcessor.getStorageAccessStatus() }.getOrNull()
             val elapsed = System.currentTimeMillis() - startedAt
             if (elapsed < 340L) {
                 delay(340L - elapsed)
             }
             _uiState.value = DsProUiState(
                 isRefreshing = false,
-                hasStorageAccess = storageStatus?.hasAccess ?: currentState.hasStorageAccess,
-                hasPersistedFolder = storageStatus?.hasPersistedFolder ?: currentState.hasPersistedFolder,
-                storageFolderLabel = storageStatus?.folderLabel ?: currentState.storageFolderLabel,
-                toastEvent = nextToast("Workspace reset"),
+                toastEvent = null,
             )
         }
     }
@@ -285,41 +194,6 @@ class MainViewModel(
                     toastEvent = nextToast(result.summary),
                 )
             }
-        }
-    }
-
-    fun saveToGrantedStorageFolder(onNeedDocumentPickerFallback: (() -> Unit)? = null) {
-        val state = _uiState.value
-        val path = state.runResult?.outputApkPath ?: return
-        val pkg = state.selectedApk?.packageName ?: "app"
-        val suggestedName = ApkFileStorageService.buildProtectedFileName(pkg)
-
-        viewModelScope.launch {
-            protectionProcessor.exportUnsignedApkToStorageFolder(path, suggestedName)
-                .onSuccess { info ->
-                    val toastMsg = "Save Complete! ${info.fileName} (${formatBytes(info.sizeBytes)})"
-                    _uiState.update {
-                        it.copy(
-                            isExported = true,
-                            exportedSizeBytes = info.sizeBytes,
-                            exportedFileName = info.fileName,
-                            exportedFolderLabel = info.folderLabel,
-                            showSaveCompleteDialog = true,
-                            statusMessage = toastMsg,
-                            toastEvent = nextToast(toastMsg),
-                        )
-                    }
-                }
-                .onFailure { err ->
-                    refreshStoragePermissionState()
-                    if (onNeedDocumentPickerFallback != null) {
-                        onNeedDocumentPickerFallback()
-                    } else {
-                        _uiState.update {
-                            it.copy(toastEvent = nextToast("Save failed: ${err.message}"))
-                        }
-                    }
-                }
         }
     }
 
