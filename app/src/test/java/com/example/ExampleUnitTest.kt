@@ -717,6 +717,7 @@ class ExampleUnitTest {
                 assertEquals("1", metaLines[6].trim()) // strict pre-decrypt anti-dump enabled
                 assertEquals("S1", metaLines[7].trim()) // string encryption enabled
                 assertEquals(2, metaLines[8].trim().split(",").size) // 2 inner DEX SHA-256 digests
+                assertEquals("M1", metaLines[9].trim()) // pre-decrypt zero-delay anti-capture enabled
                 assertEquals(2, decryptedList.size)
                 assertArrayEquals(appDex1, decryptedList[0])
                 assertArrayEquals(DexPatcher.obfuscateControlFlow(appDex2).first, decryptedList[1])
@@ -868,6 +869,7 @@ class ExampleUnitTest {
                 assertEquals("androidx.core.app.CoreComponentFactory", metaLines[2].trim())
                 assertEquals("1", metaLines[4].trim())
                 assertEquals("S1", metaLines[7].trim())
+                assertEquals("M1", metaLines[9].trim())
                 assertEquals(stats.encryptedDexCount, decryptedDexes.size)
                 decryptedDexes.forEach { assertTrue(DexPatcher.isValidDex(it)) }
 
@@ -1775,7 +1777,45 @@ class ExampleUnitTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun `dspro core disables pre-decrypt anti-capture flag when modified guard is off`() {
+        val tempDir = Files.createTempDirectory("dspro_core_m0_test").toFile()
+        try {
+            val inputApk = File(tempDir, "m0_target.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest("com.m0.app", debuggable = true, allowBackup = true)
+            val appDex = buildSyntheticDex(withDebugInfo = false)
+            val coreDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/core/DsProApplication;")
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+            }
+
+            val outApk = File(tempDir, "m0_protected.apk")
+            ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = outApk,
+                analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.m0.app"),
+                config = ProtectionConfig(dsProDexEncryption = true, antiTampering = false),
+                coreDexBytes = coreDex,
+            )
+
+            ZipFile(outApk).use { outZip ->
+                val (metaLines, decryptedList) = decryptCorePayloads(outZip, "com.m0.app")
+                assertEquals("M0", metaLines[9].trim())
+                assertEquals(1, decryptedList.size)
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
 }
+
 
 
 

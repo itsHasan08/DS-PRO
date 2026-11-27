@@ -70,7 +70,8 @@ public final class DsProComponentFactory extends AppComponentFactory {
                 aInfo.sourceDir,
                 aInfo.dataDir,
                 aInfo.packageName,
-                bundle.metadata.antiDumpEnabled
+                bundle.metadata.antiDumpEnabled,
+                bundle.metadata.antiTamperingEnabled
             );
             Thread.currentThread().setContextClassLoader(finalLoader);
             return finalLoader;

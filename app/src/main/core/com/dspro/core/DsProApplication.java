@@ -55,7 +55,8 @@ public class DsProApplication extends Application {
                 base.getPackageCodePath(),
                 dataDir,
                 base.getPackageName(),
-                bundle.metadata.antiDumpEnabled
+                bundle.metadata.antiDumpEnabled,
+                bundle.metadata.antiTamperingEnabled
             );
         }
 

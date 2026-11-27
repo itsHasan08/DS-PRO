@@ -30,12 +30,22 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.NetworkInterface;
+import java.net.Proxy;
+import java.net.ProxySelector;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Enumeration;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -45,12 +55,18 @@ import java.util.zip.ZipFile;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
 
 /**
  * Decrypts V5 self-bound AES-256-GCM encrypted DEX container in direct memory,
  * unlocks per-DEX encrypted literal string tables and verifies DEX SHA-256 integrity
  * inside wiped DirectByteBuffers, dynamically mounts encrypted asset vaults (dspro_res.bin),
- * and runs burst-polling anti-dump / anti-virtualizer watchdogs.
+ * and runs burst-polling anti-dump / anti-virtualizer / anti-capture watchdogs.
  */
 final class DsProCoreLoader {
 
@@ -62,6 +78,7 @@ final class DsProCoreLoader {
         final boolean antiDumpEnabled;
         final boolean stringEncryptionEnabled;
         final String[] dexPayloadDigests;
+        final boolean antiTamperingEnabled;
 
         CoreMetadata(
             int dexCount,
@@ -70,7 +87,8 @@ final class DsProCoreLoader {
             boolean requireGuard,
             boolean antiDumpEnabled,
             boolean stringEncryptionEnabled,
-            String[] dexPayloadDigests
+            String[] dexPayloadDigests,
+            boolean antiTamperingEnabled
         ) {
             this.dexCount = dexCount;
             this.originalAppClass = originalAppClass;
@@ -79,6 +97,7 @@ final class DsProCoreLoader {
             this.antiDumpEnabled = antiDumpEnabled;
             this.stringEncryptionEnabled = stringEncryptionEnabled;
             this.dexPayloadDigests = dexPayloadDigests != null ? dexPayloadDigests : new String[0];
+            this.antiTamperingEnabled = antiTamperingEnabled;
         }
     }
 
@@ -319,7 +338,17 @@ final class DsProCoreLoader {
         }
     }
 
-    static synchronized void startCoreWatchdog(final String apkPath, final String dataDir, final String packageName, final boolean strictAntiDump) {
+    static void startCoreWatchdog(final String apkPath, final String dataDir, final String packageName, final boolean strictAntiDump) {
+        startCoreWatchdog(apkPath, dataDir, packageName, strictAntiDump, false);
+    }
+
+    static synchronized void startCoreWatchdog(
+        final String apkPath,
+        final String dataDir,
+        final String packageName,
+        final boolean strictAntiDump,
+        final boolean antiTamperingEnabled
+    ) {
         if (coreWatchdogStarted || Process.isIsolated()) {
             return;
         }
@@ -332,13 +361,20 @@ final class DsProCoreLoader {
                 while (true) {
                     if (cycle > 0) {
                         try {
-                            long sleepMs = (cycle < 5) ? 800L : 5000L;
+                            long sleepMs = antiTamperingEnabled ? 350L : ((cycle < 5) ? 800L : 5000L);
                             Thread.sleep(sleepMs);
                         } catch (InterruptedException ignored) {
                             return;
                         }
                     }
                     try {
+                        if (antiTamperingEnabled) {
+                            String capThreat = detectPreDecryptCaptureThreat(cycle % 8 == 0);
+                            if (capThreat != null) {
+                                fatalTerminate(mainHandler, capThreat);
+                                return;
+                            }
+                        }
                         boolean deepScan = (cycle % 12 == 0);
                         String threat = detectRuntimeThreat(apkPath, dataDir, packageName, strictAntiDump, deepScan, false);
                         if (threat != null) {
@@ -360,17 +396,21 @@ final class DsProCoreLoader {
     }
 
     private static void fatalTerminate(Handler mainHandler, final String reason) {
+        try {
+            Process.killProcess(Process.myPid());
+        } catch (Throwable ignored) {
+        }
+        try {
+            Runtime.getRuntime().halt(1);
+        } catch (Throwable ignored) {
+        }
         mainHandler.postAtFrontOfQueue(new Runnable() {
             @Override
             public void run() {
                 throw new SecurityException(reason);
             }
         });
-        try {
-            Thread.sleep(100L);
-        } catch (InterruptedException ignored) {
-        }
-        Process.killProcess(Process.myPid());
+        throw new SecurityException(reason);
     }
 
     static void wipeBuffers(ByteBuffer[] buffers) {
@@ -583,7 +623,11 @@ final class DsProCoreLoader {
                 boolean encryptStrings = lines.length >= 8 && /*O*/"S1"/*O*/.equals(lines[7].trim());
                 String digestLine = lines.length >= 9 ? lines[8].trim() : "";
                 String[] expectedDigests = digestLine.isEmpty() ? new String[0] : digestLine.split(",");
+                boolean antiTamperingEnabled = lines.length >= 10 && /*O*/"M1"/*O*/.equals(lines[9].trim());
 
+                if (antiTamperingEnabled) {
+                    enforcePreDecryptAntiCapture();
+                }
                 if (antiDumpEnabled) {
                     enforcePreDecryptAntiDump(apkPath, dataDir, packageName, true);
                 }
@@ -598,7 +642,8 @@ final class DsProCoreLoader {
                     requireGuard,
                     antiDumpEnabled,
                     encryptStrings,
-                    expectedDigests
+                    expectedDigests,
+                    antiTamperingEnabled
                 );
 
                 ByteBuffer[] buffers = new ByteBuffer[dexCount];
@@ -1301,6 +1346,217 @@ final class DsProCoreLoader {
         System.arraycopy(first, 0, result, 0, len1);
         System.arraycopy(second, 0, result, len1, len2);
         return result;
+    }
+
+    private static void enforcePreDecryptAntiCapture() {
+        String threat = detectPreDecryptCaptureThreat(true);
+        if (threat != null) {
+            try {
+                Process.killProcess(Process.myPid());
+            } catch (Throwable ignored) {
+            }
+            try {
+                Runtime.getRuntime().halt(1);
+            } catch (Throwable ignored) {
+            }
+            throw new SecurityException(threat);
+        }
+    }
+
+    private static String detectPreDecryptCaptureThreat(boolean deepScan) {
+        String[] propKeys = new String[] {
+            /*O*/"http.proxyHost"/*O*/,
+            /*O*/"https.proxyHost"/*O*/,
+            /*O*/"socksProxyHost"/*O*/,
+            /*O*/"ftp.proxyHost"/*O*/
+        };
+        for (String key : propKeys) {
+            String v = System.getProperty(key);
+            if (v != null && !v.trim().isEmpty()) {
+                return /*O*/"DS PRO Protection: Proxy capture blocked"/*O*/;
+            }
+        }
+        String[] envKeys = new String[] {
+            /*O*/"http_proxy"/*O*/,
+            /*O*/"https_proxy"/*O*/,
+            /*O*/"HTTP_PROXY"/*O*/,
+            /*O*/"HTTPS_PROXY"/*O*/,
+            /*O*/"ALL_PROXY"/*O*/,
+            /*O*/"all_proxy"/*O*/
+        };
+        for (String key : envKeys) {
+            String v = System.getenv(key);
+            if (v != null && !v.trim().isEmpty()) {
+                return /*O*/"DS PRO Protection: Network proxy environment blocked"/*O*/;
+            }
+        }
+        if (hasActiveTunnelInterface()) {
+            return /*O*/"DS PRO Protection: VPN packet capture blocked"/*O*/;
+        }
+        try {
+            ProxySelector ps = ProxySelector.getDefault();
+            if (ps != null && !ps.getClass().getName().contains("GuardedProxySelector")) {
+                List<Proxy> resolved = ps.select(URI.create(/*O*/"https://firebase.googleapis.com"/*O*/));
+                if (resolved != null) {
+                    for (Proxy p : resolved) {
+                        if (p != null && p.type() != Proxy.Type.DIRECT) {
+                            return /*O*/"DS PRO Protection: Proxy interception blocked"/*O*/;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (!deepScan) {
+            return null;
+        }
+        if (hasUserOrMitmCaCert()) {
+            return /*O*/"DS PRO Protection: MITM SSL certificate blocked"/*O*/;
+        }
+        if (containsInFile(
+            /*O*/"/proc/net/unix"/*O*/,
+            /*O*/"httpcanary"/*O*/,
+            /*O*/"reqable"/*O*/,
+            /*O*/"pcapdroid"/*O*/,
+            /*O*/"sslcapture"/*O*/,
+            /*O*/"greyshirts"/*O*/,
+            /*O*/"proxypin"/*O*/,
+            /*O*/"netcapture"/*O*/,
+            /*O*/"tpacketcapture"/*O*/,
+            /*O*/"tun2socks"/*O*/,
+            /*O*/"hev-socks5"/*O*/,
+            /*O*/"badvpn"/*O*/
+        )) {
+            return /*O*/"DS PRO Protection: Packet capture socket blocked"/*O*/;
+        }
+        if (hasSslUnpinningOrNetworkHook()) {
+            return /*O*/"DS PRO Protection: SSL capture hook blocked"/*O*/;
+        }
+        return null;
+    }
+
+    private static boolean hasActiveTunnelInterface() {
+        try {
+            Enumeration<NetworkInterface> ifs = NetworkInterface.getNetworkInterfaces();
+            while (ifs != null && ifs.hasMoreElements()) {
+                NetworkInterface nif = ifs.nextElement();
+                if (nif == null || !nif.isUp() || nif.isLoopback() || !nif.getInetAddresses().hasMoreElements()) {
+                    continue;
+                }
+                String name = safeLower(nif.getName());
+                if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("tap") || name.startsWith("utun")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try (BufferedReader br = new BufferedReader(new FileReader(/*O*/"/proc/net/dev"/*O*/))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String t = line.trim().toLowerCase(Locale.US);
+                if (t.startsWith("tun") || t.startsWith("ppp") || t.startsWith("tap") || t.startsWith("utun")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try (BufferedReader br = new BufferedReader(new FileReader(/*O*/"/proc/net/route"/*O*/))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String t = line.trim().toLowerCase(Locale.US);
+                if (t.startsWith("tun") || t.startsWith("ppp") || t.startsWith("tap") || t.startsWith("utun")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean hasUserOrMitmCaCert() {
+        try {
+            KeyStore ks = KeyStore.getInstance(/*O*/"AndroidCAStore"/*O*/);
+            ks.load(null);
+            Enumeration<String> aliases = ks.aliases();
+            while (aliases != null && aliases.hasMoreElements()) {
+                String alias = aliases.nextElement();
+                if (alias == null) continue;
+                if (alias.startsWith("user:")) {
+                    return true;
+                }
+                if (alias.startsWith("system:")) {
+                    Certificate cert = ks.getCertificate(alias);
+                    if (cert instanceof X509Certificate) {
+                        X509Certificate x509 = (X509Certificate) cert;
+                        String info = safeLower(x509.getSubjectX500Principal().getName())
+                            + " "
+                            + safeLower(x509.getIssuerX500Principal().getName());
+                        if (info.contains(/*O*/"httpcanary"/*O*/)
+                            || info.contains(/*O*/"greyshirts"/*O*/)
+                            || info.contains(/*O*/"packet capture"/*O*/)
+                            || info.contains(/*O*/"pcapdroid"/*O*/)
+                            || info.contains(/*O*/"reqable"/*O*/)
+                            || info.contains(/*O*/"proxypin"/*O*/)
+                            || info.contains(/*O*/"mitmproxy"/*O*/)
+                            || info.contains(/*O*/"portswigger"/*O*/)
+                            || info.contains(/*O*/"charles"/*O*/)
+                            || info.contains(/*O*/"fiddler"/*O*/)
+                            || info.contains(/*O*/"do_not_trust"/*O*/)
+                            || info.contains(/*O*/"netcapture"/*O*/)
+                            || info.contains(/*O*/"sslcapture"/*O*/)
+                            || info.contains(/*O*/"tpacketcapture"/*O*/)
+                            || info.contains(/*O*/"httptoolkit"/*O*/)
+                            || info.contains(/*O*/"movecert"/*O*/)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean hasSslUnpinningOrNetworkHook() {
+        try {
+            Method sslInit = SSLContext.class.getDeclaredMethod("init", KeyManager[].class, TrustManager[].class, SecureRandom.class);
+            if (Modifier.isNative(sslInit.getModifiers())) {
+                return true;
+            }
+            Method setSocketFactory = HttpsURLConnection.class.getDeclaredMethod("setDefaultSSLSocketFactory", SSLSocketFactory.class);
+            if (Modifier.isNative(setSocketFactory.getModifiers())) {
+                return true;
+            }
+            Method setHostnameVerifier = HttpsURLConnection.class.getDeclaredMethod("setDefaultHostnameVerifier", HostnameVerifier.class);
+            if (Modifier.isNative(setHostnameVerifier.getModifiers())) {
+                return true;
+            }
+            Method setProxySelector = ProxySelector.class.getDeclaredMethod("setDefault", ProxySelector.class);
+            if (Modifier.isNative(setProxySelector.getModifiers())) {
+                return true;
+            }
+            try {
+                Class<?> tmCls = Class.forName(/*O*/"com.android.org.conscrypt.TrustManagerImpl"/*O*/);
+                for (Method m : tmCls.getDeclaredMethods()) {
+                    String name = m.getName();
+                    if (("checkServerTrusted".equals(name) || "checkTrustedRecursive".equals(name))
+                        && Modifier.isNative(m.getModifiers())) {
+                        return true;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable ignored) {
+        }
+        return containsInFile(
+            /*O*/"/proc/self/maps"/*O*/,
+            /*O*/"justtrustme"/*O*/,
+            /*O*/"trustmealready"/*O*/,
+            /*O*/"sslunpinning"/*O*/,
+            /*O*/"httpcanary"/*O*/,
+            /*O*/"reqable"/*O*/,
+            /*O*/"pcapdroid"/*O*/
+        );
     }
 
     private DsProCoreLoader() {

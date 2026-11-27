@@ -602,6 +602,7 @@ class ApkProtectionProcessor(
                             antiDumpEnabled = config.antiDump,
                             encryptStrings = config.stringEncryption,
                             dexIntegrityEnabled = config.dexIntegrityProtection,
+                            antiTamperingEnabled = config.antiTampering,
                             coreDexSha256 = coreDexSha256,
                             guardDexSha256 = guardDexSha256,
                             dexPayloads = sortedOriginalDex.map { it.second },
@@ -818,6 +819,7 @@ class ApkProtectionProcessor(
             antiDumpEnabled: Boolean,
             encryptStrings: Boolean,
             dexIntegrityEnabled: Boolean,
+            antiTamperingEnabled: Boolean = false,
             coreDexSha256: ByteArray,
             guardDexSha256: ByteArray,
             dexPayloads: List<ByteArray>,
@@ -877,7 +879,8 @@ class ApkProtectionProcessor(
                 appendLine("Z1")
                 appendLine(if (antiDumpEnabled) "1" else "0")
                 appendLine(if (encryptStrings) "S1" else "S0")
-                append(dexPayloadDigests)
+                appendLine(dexPayloadDigests)
+                append(if (antiTamperingEnabled) "M1" else "M0")
             }.toByteArray(Charsets.UTF_8)
 
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")

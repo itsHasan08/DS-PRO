@@ -538,7 +538,7 @@ private val INFO_ANTI_TAMPERING = ProtectionFeatureInfo(
     protections = listOf(
         "Detects any change to app code, layouts, or internal files",
         "Blocks HttpCanary, Packet Capture, PCAPdroid, Reqable, VPN sniffers, proxies, and MITM certificates",
-        "Shows a warning and crashes the app immediately if traffic or data capture is detected",
+        "Terminates the app immediately with zero network leak if traffic or data capture is detected",
     ),
 )
 
