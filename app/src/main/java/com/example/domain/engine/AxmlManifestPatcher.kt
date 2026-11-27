@@ -9,6 +9,7 @@ data class AxmlPatchOptions(
     val injectGuardProvider: Boolean = false,
     val enableCoreProtection: Boolean = false,
     val ensurePlayQueries: Boolean = false,
+    val ensureCaptureQueries: Boolean = false,
     val protectionIdentifier: String = "",
     val packageName: String = "",
 )
@@ -19,6 +20,7 @@ data class AxmlPatchResult(
     val guardProviderInjected: Boolean,
     val coreProtectionInjected: Boolean = false,
     val playQueriesInjected: Boolean = false,
+    val captureQueriesInjected: Boolean = false,
     val protectionIdentifierEmbedded: Boolean = false,
     val originalAppClass: String = "",
     val originalFactoryClass: String = "",
@@ -59,6 +61,25 @@ object AxmlManifestPatcher {
     const val CORE_FACTORY_CLASS = "com.dspro.core.DsProComponentFactory"
     const val PROTECTION_IDENTIFIER_META_NAME = "com.dspro.protection.IDENTIFIER"
     const val PROTECTION_IDENTIFIER_VALUE = "DS 专业版"
+
+    val CAPTURE_TOOL_PACKAGES: List<String> = listOf(
+        "com.guoshi.httpcanary",
+        "com.guoshi.httpcanary.premium",
+        "app.greyshirts.sslcapture",
+        "com.emanuelef.remote_capture",
+        "com.reqable.android",
+        "com.network.proxy",
+        "com.minhui.networkcapture",
+        "com.minhui.networkcapture.pro",
+        "jp.co.taosoftware.android.packetcapture",
+        "jp.co.taosoftware.android.packetcapturepro",
+        "com.egorovandreyrm.pcapremote",
+        "org.sandroproxy.drony",
+        "com.evbadroid.proxymon",
+        "com.xk72.charles",
+        "org.proxydroid",
+        "com.stormsniffer",
+    )
 
     private const val ATTR_NAME = 0x01010003
     private const val ATTR_DEBUGGABLE = 0x0101000f
@@ -262,6 +283,7 @@ object AxmlManifestPatcher {
             !options.injectGuardProvider &&
             !options.enableCoreProtection &&
             !options.ensurePlayQueries &&
+            !options.ensureCaptureQueries &&
             identifier.isEmpty()
         ) {
             return AxmlPatchResult(
@@ -270,6 +292,7 @@ object AxmlManifestPatcher {
                 guardProviderInjected = false,
                 coreProtectionInjected = false,
                 playQueriesInjected = false,
+                captureQueriesInjected = false,
                 protectionIdentifierEmbedded = false,
                 manifestPackageName = resolvePackageName(axmlBytes),
             )
@@ -288,6 +311,7 @@ object AxmlManifestPatcher {
         var guardProviderInjected = false
         var coreProtectionInjected = false
         var playQueriesInjected = false
+        var captureQueriesInjected = false
         var protectionIdentifierEmbedded = false
         var originalAppClass = ""
         var originalFactoryClass = ""
@@ -480,6 +504,9 @@ object AxmlManifestPatcher {
         if (options.ensurePlayQueries) {
             playQueriesInjected = ensurePlayPackageQueries(doc, appElem)
         }
+        if (options.ensureCaptureQueries) {
+            captureQueriesInjected = ensureCapturePackageQueries(doc, appElem)
+        }
 
         return AxmlPatchResult(
             manifestBytes = encode(doc),
@@ -487,6 +514,7 @@ object AxmlManifestPatcher {
             guardProviderInjected = guardProviderInjected,
             coreProtectionInjected = coreProtectionInjected,
             playQueriesInjected = playQueriesInjected,
+            captureQueriesInjected = captureQueriesInjected,
             protectionIdentifierEmbedded = protectionIdentifierEmbedded,
             originalAppClass = originalAppClass,
             originalFactoryClass = originalFactoryClass,
@@ -679,8 +707,26 @@ object AxmlManifestPatcher {
     private fun ensurePlayPackageQueries(
         doc: ParsedAxml,
         appElem: XmlChunk.StartElement,
+    ): Boolean = ensureQueriesPackages(
+        doc = doc,
+        appElem = appElem,
+        targetPackages = listOf("com.android.vending", "com.google.android.gms"),
+    )
+
+    private fun ensureCapturePackageQueries(
+        doc: ParsedAxml,
+        appElem: XmlChunk.StartElement,
+    ): Boolean = ensureQueriesPackages(
+        doc = doc,
+        appElem = appElem,
+        targetPackages = CAPTURE_TOOL_PACKAGES,
+    )
+
+    private fun ensureQueriesPackages(
+        doc: ParsedAxml,
+        appElem: XmlChunk.StartElement,
+        targetPackages: List<String>,
     ): Boolean {
-        val targetPackages = listOf("com.android.vending", "com.google.android.gms")
         val nameAttrIdx = doc.ensureResourceAttrString("name", ATTR_NAME)
         val androidNsIdx = ensureAndroidNsIndex(doc)
         val queriesTagIdx = doc.ensurePlainString("queries")

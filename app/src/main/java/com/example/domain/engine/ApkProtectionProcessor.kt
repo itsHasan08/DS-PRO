@@ -43,6 +43,7 @@ data class ArchiveTransformStats(
     val integrityCount: Int,
     val dexIntegrityCount: Int,
     val playQueriesInjected: Boolean = false,
+    val captureQueriesInjected: Boolean = false,
     val protectionIdentifierEmbedded: Boolean = false,
     val inputSizeBytes: Long,
     val outputSizeBytes: Long,
@@ -173,6 +174,7 @@ class ApkProtectionProcessor(
                 if (stats.debuggableDisabled) add("Block Debug (debuggable=false)")
                 if (stats.guardProviderInjected) add("<provider> DsProGuardProvider")
                 if (stats.playQueriesInjected) add("<queries> Play Store/GMS")
+                if (stats.captureQueriesInjected) add("<queries> Anti-Capture")
                 if (stats.protectionIdentifierEmbedded) add("Identifier: ${AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE}")
             }
             steps += ProtectionStepResult(
@@ -367,6 +369,7 @@ class ApkProtectionProcessor(
             var guardProviderInjected = false
             var coreProtectionInjected = false
             var playQueriesInjected = false
+            var captureQueriesInjected = false
             var protectionIdentifierEmbedded = false
             var originalAppClass = ""
             var originalFactoryClass = ""
@@ -538,6 +541,7 @@ class ApkProtectionProcessor(
                                 injectGuardProvider = effectiveInjectGuard,
                                 enableCoreProtection = config.requiresCoreDexContainer,
                                 ensurePlayQueries = config.deviceCertificate,
+                                ensureCaptureQueries = config.antiTampering,
                                 protectionIdentifier = if (shouldEmbedIdentifier) AxmlManifestPatcher.PROTECTION_IDENTIFIER_VALUE else "",
                                 packageName = effectivePackageName,
                             ),
@@ -546,6 +550,7 @@ class ApkProtectionProcessor(
                         guardProviderInjected = patchResult.guardProviderInjected
                         coreProtectionInjected = patchResult.coreProtectionInjected
                         playQueriesInjected = patchResult.playQueriesInjected
+                        captureQueriesInjected = patchResult.captureQueriesInjected
                         protectionIdentifierEmbedded = patchResult.protectionIdentifierEmbedded
                         originalAppClass = patchResult.originalAppClass
                         originalFactoryClass = patchResult.originalFactoryClass
@@ -695,6 +700,7 @@ class ApkProtectionProcessor(
                 integrityCount = integrityLines.size,
                 dexIntegrityCount = dexIntegrityLines.size,
                 playQueriesInjected = playQueriesInjected,
+                captureQueriesInjected = captureQueriesInjected,
                 protectionIdentifierEmbedded = protectionIdentifierEmbedded,
                 inputSizeBytes = inputFile.length(),
                 outputSizeBytes = outputFile.length(),

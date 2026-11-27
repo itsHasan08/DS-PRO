@@ -13,6 +13,11 @@ import android.content.res.Resources;
 import android.content.res.loader.ResourcesLoader;
 import android.content.res.loader.ResourcesProvider;
 import android.database.Cursor;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.ProxyInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -35,18 +40,27 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.IOException;
 import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.Proxy;
+import java.net.ProxySelector;
+import java.net.SocketAddress;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.security.spec.ECGenParameterSpec;
@@ -67,6 +81,12 @@ import java.util.zip.ZipFile;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
 
 /**
  * Runtime protection guard compiled into ds_pro_guard.dex and injected into protected APKs.
@@ -90,10 +110,15 @@ public final class DsProGuardProvider extends ContentProvider {
     private static final String RESOURCE_VAULT_ASSET = /*O*/"assets/dspro_res.bin"/*O*/;
     private static final String CORE_LOADER_CLASS = "com.dspro.core.DsProCoreLoader";
     private static volatile boolean watchdogStarted = false;
-    private static volatile String pendingCertWarning = null;
-    private static volatile boolean certCrashScheduled = false;
+    private static volatile String pendingWarningTitle = null;
+    private static volatile String pendingWarningMessage = null;
+    private static volatile boolean warningCrashScheduled = false;
     private static volatile WeakReference<Activity> foregroundActivityRef = new WeakReference<>(null);
-    private static volatile WeakReference<Activity> shownCertDialogActivityRef = new WeakReference<>(null);
+    private static volatile WeakReference<Activity> shownWarningDialogActivityRef = new WeakReference<>(null);
+    private static volatile ProxySelector originalProxySelector = null;
+    private static volatile boolean captureNetworkGuardInstalled = false;
+    private static volatile String cachedInstalledCaptureTool = null;
+    private static volatile long cachedCaptureToolCheckedAt = 0L;
 
     private static volatile boolean resourcesMounted = false;
     private static volatile Object cachedResourcesLoader = null;
@@ -171,8 +196,8 @@ public final class DsProGuardProvider extends ContentProvider {
                         if (antiScreenshot && activity.getWindow() != null) {
                             activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
                         }
-                        if (pendingCertWarning != null) {
-                            showCertWarningDialog(activity, pendingCertWarning);
+                        if (pendingWarningMessage != null) {
+                            showWarningDialog(activity, pendingWarningTitle, pendingWarningMessage);
                         }
                     }
 
@@ -186,8 +211,16 @@ public final class DsProGuardProvider extends ContentProvider {
                         if (antiScreenshot && activity.getWindow() != null) {
                             activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
                         }
-                        if (pendingCertWarning != null) {
-                            showCertWarningDialog(activity, pendingCertWarning);
+                        if (pendingWarningMessage != null) {
+                            showWarningDialog(activity, pendingWarningTitle, pendingWarningMessage);
+                        }
+                        if (antiTampering) {
+                            ensureCaptureNetworkGuardIntact(activity);
+                            String captureFailure = checkNetworkCaptureFailure(activity, false);
+                            if (captureFailure != null) {
+                                warnAndScheduleCrash(activity, /*O*/"Network Capture Warning"/*O*/, captureFailure);
+                                return;
+                            }
                         }
                         if (detectDebugger && isDebuggerAttached()) {
                             crashWithReason(/*O*/"Debugger detected"/*O*/);
@@ -422,7 +455,7 @@ public final class DsProGuardProvider extends ContentProvider {
                     if (policy.has(FLAG_DEVICE_CERTIFICATE)) {
                         String certFailure = checkDeviceCertificateFailure(context, false);
                         if (certFailure != null) {
-                            warnAndScheduleCrash(context, certFailure);
+                            warnAndScheduleCrash(context, /*O*/"Device Certificate Warning"/*O*/, certFailure);
                         }
                     }
                     state = 0x47C;
@@ -439,8 +472,14 @@ public final class DsProGuardProvider extends ContentProvider {
                     state = 0x591;
                     break;
                 case 0x591:
-                    if (policy.has(FLAG_ANTI_TAMPERING) && !verifyCriticalApkIntegrity(context, policy.integrityEntries, coreInitialized)) {
-                        crashWithReason(/*O*/"APK tampering detected"/*O*/);
+                    if (policy.has(FLAG_ANTI_TAMPERING)) {
+                        installCaptureResistantNetworkGuard(context);
+                        String captureFailure = checkNetworkCaptureFailure(context, true);
+                        if (captureFailure != null) {
+                            warnAndScheduleCrash(context, /*O*/"Network Capture Warning"/*O*/, captureFailure);
+                        } else if (!verifyCriticalApkIntegrity(context, policy.integrityEntries, coreInitialized)) {
+                            crashWithReason(/*O*/"APK tampering detected"/*O*/);
+                        }
                     }
                     state = 0;
                     break;
@@ -467,7 +506,8 @@ public final class DsProGuardProvider extends ContentProvider {
                 while (true) {
                     if (cycle > 0) {
                         try {
-                            long sleepMs = (cycle < 5) ? 800L : 5000L;
+                            long baseSleep = policy.has(FLAG_ANTI_TAMPERING) ? 2000L : 5000L;
+                            long sleepMs = (cycle < 5) ? 800L : baseSleep;
                             Thread.sleep(sleepMs);
                         } catch (InterruptedException ignored) {
                             return;
@@ -480,7 +520,7 @@ public final class DsProGuardProvider extends ContentProvider {
                             if (runAttestation || (cycle % 12 == 0)) {
                                 String certFailure = checkDeviceCertificateFailure(appContext, runAttestation);
                                 if (certFailure != null) {
-                                    warnAndScheduleCrash(appContext, certFailure);
+                                    warnAndScheduleCrash(appContext, /*O*/"Device Certificate Warning"/*O*/, certFailure);
                                     return;
                                 }
                             }
@@ -510,13 +550,19 @@ public final class DsProGuardProvider extends ContentProvider {
                             }
                         }
                         if (policy.has(FLAG_ANTI_TAMPERING)) {
+                            ensureCaptureNetworkGuardIntact(appContext);
+                            String captureFailure = checkNetworkCaptureFailure(appContext, (cycle % 4 == 0));
+                            if (captureFailure != null) {
+                                warnAndScheduleCrash(appContext, /*O*/"Network Capture Warning"/*O*/, captureFailure);
+                                return;
+                            }
                             if (!fullIntegrityChecked) {
                                 fullIntegrityChecked = true;
                                 if (!verifyApkIntegrity(appContext, policy.integrityEntries)) {
                                     triggerMainCrash(mainHandler, /*O*/"APK tampering detected"/*O*/);
                                     return;
                                 }
-                            } else if (cycle % 12 == 0 && !verifyCriticalApkIntegrity(appContext, policy.integrityEntries, isCoreInitialized(appContext))) {
+                            } else if (cycle % 30 == 0 && !verifyCriticalApkIntegrity(appContext, policy.integrityEntries, isCoreInitialized(appContext))) {
                                 triggerMainCrash(mainHandler, /*O*/"APK tampering detected"/*O*/);
                                 return;
                             }
@@ -563,15 +609,23 @@ public final class DsProGuardProvider extends ContentProvider {
         }
     }
 
-    private static synchronized void warnAndScheduleCrash(final Context context, final String reason) {
+    private static synchronized void warnAndScheduleCrash(
+        final Context context,
+        final String title,
+        final String reason
+    ) {
         final String fullMsg = reason.startsWith(/*O*/"DS PRO Protection:"/*O*/)
             ? reason
             : /*O*/"DS PRO Protection: "/*O*/ + reason;
-        pendingCertWarning = fullMsg;
-        if (certCrashScheduled) {
+        final String dialogTitle = (title != null && !title.isEmpty())
+            ? title
+            : /*O*/"DS PRO Security Warning"/*O*/;
+        pendingWarningTitle = dialogTitle;
+        pendingWarningMessage = fullMsg;
+        if (warningCrashScheduled) {
             return;
         }
-        certCrashScheduled = true;
+        warningCrashScheduled = true;
         Log.e(TAG, fullMsg);
         final Context appOrCtx = (context != null && context.getApplicationContext() != null)
             ? context.getApplicationContext()
@@ -588,7 +642,7 @@ public final class DsProGuardProvider extends ContentProvider {
                 }
                 Activity act = foregroundActivityRef.get();
                 if (act != null && !act.isFinishing() && !act.isDestroyed()) {
-                    showCertWarningDialog(act, fullMsg);
+                    showWarningDialog(act, dialogTitle, fullMsg);
                 }
             }
         });
@@ -601,20 +655,24 @@ public final class DsProGuardProvider extends ContentProvider {
                     Process.killProcess(Process.myPid());
                 }
             }
-        }, 1800L);
+        }, 1600L);
     }
 
-    private static void showCertWarningDialog(final Activity activity, final String message) {
+    private static void showWarningDialog(
+        final Activity activity,
+        final String title,
+        final String message
+    ) {
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
             return;
         }
-        if (shownCertDialogActivityRef.get() == activity) {
+        if (shownWarningDialogActivityRef.get() == activity) {
             return;
         }
-        shownCertDialogActivityRef = new WeakReference<>(activity);
+        shownWarningDialogActivityRef = new WeakReference<>(activity);
         try {
             new AlertDialog.Builder(activity)
-                .setTitle(/*O*/"Device Certificate Warning"/*O*/)
+                .setTitle(title != null && !title.isEmpty() ? title : /*O*/"DS PRO Security Warning"/*O*/)
                 .setMessage(message)
                 .setCancelable(false)
                 .show();
@@ -1616,6 +1674,505 @@ public final class DsProGuardProvider extends ContentProvider {
         } catch (Throwable ignored) {
         }
         return false;
+    }
+
+    private static final class GuardedProxySelector extends ProxySelector {
+        private final Context appContext;
+        private final ProxySelector delegate;
+
+        GuardedProxySelector(Context context, ProxySelector delegate) {
+            this.appContext = context != null && context.getApplicationContext() != null
+                ? context.getApplicationContext()
+                : context;
+            this.delegate = delegate;
+        }
+
+        @Override
+        public List<Proxy> select(URI uri) {
+            String captureFailure = checkFastNetworkCaptureFailure(appContext, false);
+            if (captureFailure != null) {
+                warnAndScheduleCrash(appContext, /*O*/"Network Capture Warning"/*O*/, captureFailure);
+                return Collections.singletonList(blockedLoopbackProxy());
+            }
+            if (delegate != null && uri != null) {
+                try {
+                    List<Proxy> resolved = delegate.select(uri);
+                    if (resolved != null) {
+                        for (Proxy p : resolved) {
+                            if (p != null && p.type() != Proxy.Type.DIRECT) {
+                                warnAndScheduleCrash(
+                                    appContext,
+                                    /*O*/"Network Capture Warning"/*O*/,
+                                    /*O*/"HTTP/SOCKS proxy capture detected"/*O*/
+                                );
+                                return Collections.singletonList(blockedLoopbackProxy());
+                            }
+                        }
+                        if (!resolved.isEmpty()) {
+                            return resolved;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            return Collections.singletonList(Proxy.NO_PROXY);
+        }
+
+        @Override
+        public void connectFailed(URI uri, SocketAddress sa, IOException ioe) {
+            if (delegate != null) {
+                try {
+                    delegate.connectFailed(uri, sa, ioe);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    private static Proxy blockedLoopbackProxy() {
+        return new Proxy(Proxy.Type.HTTP, new InetSocketAddress(InetAddress.getLoopbackAddress(), 9));
+    }
+
+    private static synchronized void installCaptureResistantNetworkGuard(Context context) {
+        if (context == null || Process.isIsolated()) {
+            return;
+        }
+        Context appCtx = context.getApplicationContext() != null ? context.getApplicationContext() : context;
+        try {
+            ProxySelector current = ProxySelector.getDefault();
+            if (!(current instanceof GuardedProxySelector)) {
+                originalProxySelector = current;
+                ProxySelector.setDefault(new GuardedProxySelector(appCtx, current));
+            }
+            captureNetworkGuardInstalled = true;
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void ensureCaptureNetworkGuardIntact(Context context) {
+        if (!captureNetworkGuardInstalled || context == null || Process.isIsolated()) {
+            return;
+        }
+        try {
+            ProxySelector current = ProxySelector.getDefault();
+            if (!(current instanceof GuardedProxySelector)) {
+                if (current != null) {
+                    String cls = safeLower(current.getClass().getName());
+                    if (cls.contains(/*O*/"proxy"/*O*/)
+                        || cls.contains(/*O*/"canary"/*O*/)
+                        || cls.contains(/*O*/"reqable"/*O*/)
+                        || cls.contains(/*O*/"xposed"/*O*/)
+                        || cls.contains(/*O*/"lsposed"/*O*/)
+                        || cls.contains(/*O*/"hook"/*O*/)) {
+                        warnAndScheduleCrash(
+                            context,
+                            /*O*/"Network Capture Warning"/*O*/,
+                            /*O*/"Network proxy selector override detected"/*O*/
+                        );
+                        return;
+                    }
+                    try {
+                        List<Proxy> probe = current.select(URI.create(/*O*/"https://firebase.googleapis.com"/*O*/));
+                        if (probe != null) {
+                            for (Proxy p : probe) {
+                                if (p != null && p.type() != Proxy.Type.DIRECT) {
+                                    warnAndScheduleCrash(
+                                        context,
+                                        /*O*/"Network Capture Warning"/*O*/,
+                                        /*O*/"Active proxy capture override detected"/*O*/
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                installCaptureResistantNetworkGuard(context);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static String checkNetworkCaptureFailure(Context context, boolean deepScan) {
+        String fast = checkFastNetworkCaptureFailure(context, true);
+        if (fast != null) {
+            return fast;
+        }
+        if (!deepScan) {
+            return null;
+        }
+        String captureTool = findInstalledCaptureToolLabel(context, true);
+        String mitmErr = checkMitmCertificates(captureTool);
+        if (mitmErr != null) {
+            return mitmErr;
+        }
+        if (captureTool != null && hasLocalCaptureProxyPortListening()) {
+            return /*O*/"Local packet capture proxy active ("/*O*/ + captureTool + ")";
+        }
+        String hookErr = checkNetworkSslHooks();
+        if (hookErr != null) {
+            return hookErr;
+        }
+        return null;
+    }
+
+    private static String checkFastNetworkCaptureFailure(Context context, boolean includeProxySelectorProbe) {
+        String propHost = firstNonEmpty(
+            System.getProperty(/*O*/"http.proxyHost"/*O*/),
+            System.getProperty(/*O*/"https.proxyHost"/*O*/),
+            System.getProperty(/*O*/"socksProxyHost"/*O*/),
+            System.getProperty(/*O*/"ftp.proxyHost"/*O*/)
+        );
+        if (!propHost.isEmpty()) {
+            return /*O*/"HTTP/SOCKS proxy capture detected ("/*O*/ + propHost + ")";
+        }
+
+        String envProxy = firstNonEmpty(
+            System.getenv(/*O*/"http_proxy"/*O*/),
+            System.getenv(/*O*/"https_proxy"/*O*/),
+            System.getenv(/*O*/"HTTP_PROXY"/*O*/),
+            System.getenv(/*O*/"HTTPS_PROXY"/*O*/),
+            System.getenv(/*O*/"ALL_PROXY"/*O*/),
+            System.getenv(/*O*/"all_proxy"/*O*/)
+        );
+        if (!envProxy.isEmpty()) {
+            return /*O*/"Network proxy environment capture detected"/*O*/;
+        }
+
+        String activeTunnel = findActiveCaptureTunnelInterface();
+        boolean vpnTransport = false;
+        if (context != null) {
+            try {
+                ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    ProxyInfo defaultProxy = cm.getDefaultProxy();
+                    if (isActiveProxyInfo(defaultProxy)) {
+                        return /*O*/"System HTTP proxy capture detected"/*O*/;
+                    }
+                    Network activeNet = cm.getActiveNetwork();
+                    if (activeNet != null) {
+                        LinkProperties lp = cm.getLinkProperties(activeNet);
+                        if (lp != null && isActiveProxyInfo(lp.getHttpProxy())) {
+                            return /*O*/"Network HTTP proxy interception detected"/*O*/;
+                        }
+                    }
+                    Network[] allNets = cm.getAllNetworks();
+                    if (allNets != null) {
+                        for (Network net : allNets) {
+                            if (net == null) continue;
+                            NetworkCapabilities nc = cm.getNetworkCapabilities(net);
+                            if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                                vpnTransport = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        if (activeTunnel != null || vpnTransport) {
+            String tool = findInstalledCaptureToolLabel(context, false);
+            if (tool != null) {
+                return /*O*/"Packet capture tool active ("/*O*/ + tool + /*O*/" VPN)"/*O*/;
+            }
+            return /*O*/"Packet capture / VPN tunnel blocked ("/*O*/
+                + (activeTunnel != null ? activeTunnel : /*O*/"VPN"/*O*/)
+                + ")";
+        }
+
+        if (includeProxySelectorProbe) {
+            ProxySelector ps = originalProxySelector;
+            if (ps == null) {
+                ProxySelector def = ProxySelector.getDefault();
+                if (!(def instanceof GuardedProxySelector)) {
+                    ps = def;
+                }
+            }
+            if (ps != null) {
+                String[] probeUrls = new String[] {
+                    /*O*/"https://firebase.googleapis.com"/*O*/,
+                    /*O*/"https://accounts.google.com"/*O*/,
+                    /*O*/"http://example.com"/*O*/
+                };
+                for (String u : probeUrls) {
+                    try {
+                        List<Proxy> list = ps.select(URI.create(u));
+                        if (list != null) {
+                            for (Proxy p : list) {
+                                if (p != null && p.type() != Proxy.Type.DIRECT) {
+                                    return /*O*/"Proxy packet capture detected"/*O*/;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isActiveProxyInfo(ProxyInfo info) {
+        if (info == null) {
+            return false;
+        }
+        String host = info.getHost();
+        if (host != null && !host.trim().isEmpty()) {
+            return true;
+        }
+        Uri pac = info.getPacFileUrl();
+        return pac != null && !Uri.EMPTY.equals(pac) && !pac.toString().trim().isEmpty();
+    }
+
+    private static String findActiveCaptureTunnelInterface() {
+        try {
+            Enumeration<NetworkInterface> ifs = NetworkInterface.getNetworkInterfaces();
+            while (ifs != null && ifs.hasMoreElements()) {
+                NetworkInterface nif = ifs.nextElement();
+                if (nif == null || !nif.isUp() || nif.isLoopback()) {
+                    continue;
+                }
+                if (!nif.getInetAddresses().hasMoreElements()) {
+                    continue;
+                }
+                String name = safeLower(nif.getName());
+                if (name.startsWith("tun")
+                    || name.startsWith("ppp")
+                    || name.startsWith("tap")
+                    || name.startsWith("utun")) {
+                    return nif.getName();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/net/dev"/*O*/))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String trimmed = line.trim().toLowerCase(Locale.US);
+                if (trimmed.startsWith("tun")
+                    || trimmed.startsWith("ppp")
+                    || trimmed.startsWith("tap")
+                    || trimmed.startsWith("utun")) {
+                    int colon = trimmed.indexOf(':');
+                    if (colon > 0) {
+                        return trimmed.substring(0, colon).trim();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static String findInstalledCaptureToolLabel(Context context, boolean forceRefresh) {
+        if (context == null || Process.isIsolated()) {
+            return null;
+        }
+        long now = System.currentTimeMillis();
+        if (!forceRefresh && cachedCaptureToolCheckedAt > 0L && (now - cachedCaptureToolCheckedAt) < 12000L) {
+            return cachedInstalledCaptureTool;
+        }
+        PackageManager pm;
+        try {
+            pm = context.getPackageManager();
+        } catch (Throwable ignored) {
+            return null;
+        }
+        if (pm == null) {
+            return null;
+        }
+        String[][] knownTools = new String[][] {
+            { /*O*/"com.guoshi.httpcanary"/*O*/, /*O*/"HttpCanary"/*O*/ },
+            { /*O*/"com.guoshi.httpcanary.premium"/*O*/, /*O*/"HttpCanary"/*O*/ },
+            { /*O*/"app.greyshirts.sslcapture"/*O*/, /*O*/"Packet Capture"/*O*/ },
+            { /*O*/"com.emanuelef.remote_capture"/*O*/, /*O*/"PCAPdroid"/*O*/ },
+            { /*O*/"com.reqable.android"/*O*/, /*O*/"Reqable"/*O*/ },
+            { /*O*/"com.network.proxy"/*O*/, /*O*/"ProxyPin"/*O*/ },
+            { /*O*/"com.minhui.networkcapture"/*O*/, /*O*/"NetCapture"/*O*/ },
+            { /*O*/"com.minhui.networkcapture.pro"/*O*/, /*O*/"NetCapture"/*O*/ },
+            { /*O*/"jp.co.taosoftware.android.packetcapture"/*O*/, /*O*/"tPacketCapture"/*O*/ },
+            { /*O*/"jp.co.taosoftware.android.packetcapturepro"/*O*/, /*O*/"tPacketCapture"/*O*/ },
+            { /*O*/"com.egorovandreyrm.pcapremote"/*O*/, /*O*/"PCAP Remote"/*O*/ },
+            { /*O*/"org.sandroproxy.drony"/*O*/, /*O*/"Drony"/*O*/ },
+            { /*O*/"com.evbadroid.proxymon"/*O*/, /*O*/"ProxyMon"/*O*/ },
+            { /*O*/"com.xk72.charles"/*O*/, /*O*/"Charles Proxy"/*O*/ },
+            { /*O*/"org.proxydroid"/*O*/, /*O*/"ProxyDroid"/*O*/ },
+            { /*O*/"com.stormsniffer"/*O*/, /*O*/"Storm Sniffer"/*O*/ }
+        };
+        String found = null;
+        for (String[] pair : knownTools) {
+            try {
+                pm.getPackageInfo(pair[0], 0);
+                found = pair[1];
+                break;
+            } catch (PackageManager.NameNotFoundException ignored) {
+            } catch (Throwable ignored) {
+            }
+        }
+        cachedInstalledCaptureTool = found;
+        cachedCaptureToolCheckedAt = now;
+        return found;
+    }
+
+    private static String checkMitmCertificates(String installedCaptureTool) {
+        try {
+            KeyStore ks = KeyStore.getInstance(/*O*/"AndroidCAStore"/*O*/);
+            ks.load(null);
+            Enumeration<String> aliases = ks.aliases();
+            boolean hasAnyUserCa = false;
+            while (aliases != null && aliases.hasMoreElements()) {
+                String alias = aliases.nextElement();
+                if (alias != null && alias.startsWith("user:")) {
+                    hasAnyUserCa = true;
+                    Certificate cert = ks.getCertificate(alias);
+                    if (cert instanceof X509Certificate) {
+                        X509Certificate x509 = (X509Certificate) cert;
+                        String info = safeLower(x509.getSubjectX500Principal().getName())
+                            + " "
+                            + safeLower(x509.getIssuerX500Principal().getName());
+                        if (info.contains(/*O*/"httpcanary"/*O*/)
+                            || info.contains(/*O*/"greyshirts"/*O*/)
+                            || info.contains(/*O*/"packet capture"/*O*/)
+                            || info.contains(/*O*/"pcapdroid"/*O*/)
+                            || info.contains(/*O*/"reqable"/*O*/)
+                            || info.contains(/*O*/"proxypin"/*O*/)
+                            || info.contains(/*O*/"mitmproxy"/*O*/)
+                            || info.contains(/*O*/"portswigger"/*O*/)
+                            || info.contains(/*O*/"charles"/*O*/)
+                            || info.contains(/*O*/"fiddler"/*O*/)
+                            || info.contains(/*O*/"do_not_trust"/*O*/)
+                            || info.contains(/*O*/"netcapture"/*O*/)
+                            || info.contains(/*O*/"sslcapture"/*O*/)
+                            || info.contains(/*O*/"tpacketcapture"/*O*/)
+                            || info.contains(/*O*/"sandroproxy"/*O*/)
+                            || info.contains(/*O*/"stormsniffer"/*O*/)
+                            || info.contains(/*O*/"httptoolkit"/*O*/)) {
+                            return /*O*/"MITM SSL capture certificate detected"/*O*/;
+                        }
+                    }
+                }
+            }
+            if (hasAnyUserCa && installedCaptureTool != null) {
+                return /*O*/"User SSL capture certificate active ("/*O*/ + installedCaptureTool + ")";
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static boolean hasLocalCaptureProxyPortListening() {
+        // Hex ports in /proc/net/tcp: 8888=22B8, 8899=22C3, 8080=1F90, 8081=1F91,
+        // 9000=2328, 9090=2382, 8866=22A2, 8877=22AD, 9999=270F
+        String[] portHexes = new String[] {
+            ":22b8 ", ":22c3 ", ":1f90 ", ":1f91 ", ":2328 ", ":2382 ", ":22a2 ", ":22ad ", ":270f "
+        };
+        String[] tcpPaths = new String[] { /*O*/"/proc/net/tcp"/*O*/, /*O*/"/proc/net/tcp6"/*O*/ };
+        for (String path : tcpPaths) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String lower = line.toLowerCase(Locale.US);
+                    if (!lower.contains(" 0a ")) {
+                        continue;
+                    }
+                    for (String pHex : portHexes) {
+                        if (lower.contains(pHex)) {
+                            return true;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
+    }
+
+    private static String checkNetworkSslHooks() {
+        try {
+            Method sslInit = SSLContext.class.getDeclaredMethod(
+                "init",
+                KeyManager[].class,
+                TrustManager[].class,
+                SecureRandom.class
+            );
+            if (Modifier.isNative(sslInit.getModifiers())) {
+                return /*O*/"SSL/TLS hook detected (SSLContext)"/*O*/;
+            }
+            Method setSocketFactory = HttpsURLConnection.class.getDeclaredMethod(
+                "setDefaultSSLSocketFactory",
+                SSLSocketFactory.class
+            );
+            if (Modifier.isNative(setSocketFactory.getModifiers())) {
+                return /*O*/"SSL/TLS hook detected (SSLSocketFactory)"/*O*/;
+            }
+            Method setHostnameVerifier = HttpsURLConnection.class.getDeclaredMethod(
+                "setDefaultHostnameVerifier",
+                HostnameVerifier.class
+            );
+            if (Modifier.isNative(setHostnameVerifier.getModifiers())) {
+                return /*O*/"SSL/TLS hook detected (HostnameVerifier)"/*O*/;
+            }
+            Method setProxySelector = ProxySelector.class.getDeclaredMethod("setDefault", ProxySelector.class);
+            if (Modifier.isNative(setProxySelector.getModifiers())) {
+                return /*O*/"Network hook detected (ProxySelector)"/*O*/;
+            }
+            try {
+                Class<?> tmCls = Class.forName(/*O*/"com.android.org.conscrypt.TrustManagerImpl"/*O*/);
+                for (Method m : tmCls.getDeclaredMethods()) {
+                    String name = m.getName();
+                    if (("checkServerTrusted".equals(name) || "checkTrustedRecursive".equals(name))
+                        && Modifier.isNative(m.getModifiers())) {
+                        return /*O*/"SSL unpinning hook detected (TrustManager)"/*O*/;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            HostnameVerifier hv = HttpsURLConnection.getDefaultHostnameVerifier();
+            if (hv != null) {
+                String hvName = safeLower(hv.getClass().getName());
+                if (hvName.contains(/*O*/"allowall"/*O*/)
+                    || hvName.contains(/*O*/"trustall"/*O*/)
+                    || hvName.contains(/*O*/"justtrustme"/*O*/)
+                    || hvName.contains(/*O*/"sslunpin"/*O*/)
+                    || hvName.contains(/*O*/"xposed"/*O*/)
+                    || hvName.contains(/*O*/"lsposed"/*O*/)) {
+                    return /*O*/"SSL hostname verification bypass detected"/*O*/;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (containsInFile(
+            /*O*/"/proc/self/maps"/*O*/,
+            /*O*/"justtrustme"/*O*/,
+            /*O*/"trustmealready"/*O*/,
+            /*O*/"sslunpinning"/*O*/,
+            /*O*/"httpcanary"/*O*/,
+            /*O*/"reqable"/*O*/,
+            /*O*/"pcapdroid"/*O*/,
+            /*O*/"frida-agent"/*O*/,
+            /*O*/"lsposed"/*O*/
+        )) {
+            return /*O*/"Runtime network capture / SSL bypass module detected"/*O*/;
+        }
+        return null;
+    }
+
+    private static String firstNonEmpty(String... values) {
+        if (values == null) {
+            return "";
+        }
+        for (String v : values) {
+            if (v != null) {
+                String trimmed = v.trim();
+                if (!trimmed.isEmpty()) {
+                    return trimmed;
+                }
+            }
+        }
+        return "";
     }
 
     private static String safeLower(String s) {

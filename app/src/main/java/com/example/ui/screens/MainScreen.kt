@@ -533,12 +533,12 @@ private val INFO_ANTI_SCREENSHOT = ProtectionFeatureInfo(
 private val INFO_ANTI_TAMPERING = ProtectionFeatureInfo(
     id = "anti_tampering",
     title = "Modified Guard",
-    fullName = "Anti-Tampering & APK Modification Guard",
-    summary = "Prevents your app from being edited, hacked, or turned into a mod APK.",
+    fullName = "Anti-Tampering, Anti-Capture & APK Guard",
+    summary = "Prevents APK modification and blocks HttpCanary, Packet Capture, proxy sniffers, and SSL MITM interception.",
     protections = listOf(
         "Detects any change to app code, layouts, or internal files",
-        "Blocks repacked, patched, or re-signed mod APKs from opening",
-        "Verifies app integrity at startup and during use",
+        "Blocks HttpCanary, Packet Capture, PCAPdroid, Reqable, VPN sniffers, proxies, and MITM certificates",
+        "Shows a warning and crashes the app immediately if traffic or data capture is detected",
     ),
 )
 

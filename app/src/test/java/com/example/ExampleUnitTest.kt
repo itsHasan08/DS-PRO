@@ -1710,6 +1710,72 @@ class ExampleUnitTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun `modified guard injects anti-capture package queries alongside play queries without duplicates`() {
+        val tempDir = Files.createTempDirectory("dspro_capture_queries_test").toFile()
+        try {
+            val inputApk = File(tempDir, "capture_target.apk")
+            val rawManifest = AxmlManifestPatcher.buildMinimalManifestForTest(
+                packageName = "com.capture.target",
+                debuggable = true,
+                allowBackup = true,
+            )
+            val appDex = buildSyntheticDex(withDebugInfo = false)
+            val guardDex = buildSyntheticDex(withDebugInfo = false, descriptor = "Lcom/dspro/guard/DsProGuardProvider;")
+
+            ZipOutputStream(FileOutputStream(inputApk)).use { zip ->
+                zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
+                zip.write(rawManifest)
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(appDex)
+                zip.closeEntry()
+            }
+
+            val outApk = File(tempDir, "capture_protected.apk")
+            val stats = ApkProtectionProcessor.transformApkArchive(
+                inputFile = inputApk,
+                outputFile = outApk,
+                analysis = sampleApk(inputApk.absolutePath).copy(packageName = "com.capture.target"),
+                config = ProtectionConfig(
+                    antiTampering = true,
+                    deviceCertificate = true,
+                ),
+                guardDexBytes = guardDex,
+            )
+
+            assertTrue(stats.guardProviderInjected)
+            assertTrue(stats.playQueriesInjected)
+            assertTrue(stats.captureQueriesInjected)
+            assertTrue(ApkProtectionProcessor.verifyOutputApk(outApk).first)
+
+            ZipFile(outApk).use { zip ->
+                val outManifest = zip.getInputStream(zip.getEntry("AndroidManifest.xml")).readBytes()
+                val queries = AxmlManifestPatcher.inspectPlayQueriesForTest(outManifest)
+                assertTrue(queries.contains("com.android.vending"))
+                assertTrue(queries.contains("com.google.android.gms"))
+                assertTrue(queries.contains("com.guoshi.httpcanary"))
+                assertTrue(queries.contains("app.greyshirts.sslcapture"))
+                assertTrue(queries.contains("com.emanuelef.remote_capture"))
+                assertTrue(queries.contains("com.reqable.android"))
+
+                val repatched = AxmlManifestPatcher.patch(
+                    outManifest,
+                    AxmlPatchOptions(
+                        injectGuardProvider = true,
+                        ensurePlayQueries = true,
+                        ensureCaptureQueries = true,
+                        packageName = "com.capture.target",
+                    ),
+                )
+                assertEquals(queries, AxmlManifestPatcher.inspectPlayQueriesForTest(repatched.manifestBytes))
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
 }
+
 
 
