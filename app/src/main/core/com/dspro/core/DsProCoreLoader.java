@@ -1390,9 +1390,6 @@ final class DsProCoreLoader {
                 return /*O*/"DS PRO Protection: Network proxy environment blocked"/*O*/;
             }
         }
-        if (hasActiveTunnelInterface()) {
-            return /*O*/"DS PRO Protection: VPN packet capture blocked"/*O*/;
-        }
         try {
             ProxySelector ps = ProxySelector.getDefault();
             if (ps != null && !ps.getClass().getName().contains("GuardedProxySelector")) {
@@ -1409,6 +1406,9 @@ final class DsProCoreLoader {
         }
         if (!deepScan) {
             return null;
+        }
+        if (hasActiveTunnelInterface() && hasLocalCaptureProxyPortListening()) {
+            return /*O*/"DS PRO Protection: VPN packet capture blocked"/*O*/;
         }
         if (hasUserOrMitmCaCert()) {
             return /*O*/"DS PRO Protection: MITM SSL certificate blocked"/*O*/;
@@ -1443,18 +1443,7 @@ final class DsProCoreLoader {
                 if (nif == null || !nif.isUp() || nif.isLoopback() || !nif.getInetAddresses().hasMoreElements()) {
                     continue;
                 }
-                String name = safeLower(nif.getName());
-                if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("tap") || name.startsWith("utun")) {
-                    return true;
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        try (BufferedReader br = new BufferedReader(new FileReader(/*O*/"/proc/net/dev"/*O*/))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                String t = line.trim().toLowerCase(Locale.US);
-                if (t.startsWith("tun") || t.startsWith("ppp") || t.startsWith("tap") || t.startsWith("utun")) {
+                if (isRealTunnelName(nif.getName())) {
                     return true;
                 }
             }
@@ -1463,12 +1452,75 @@ final class DsProCoreLoader {
         try (BufferedReader br = new BufferedReader(new FileReader(/*O*/"/proc/net/route"/*O*/))) {
             String line;
             while ((line = br.readLine()) != null) {
-                String t = line.trim().toLowerCase(Locale.US);
-                if (t.startsWith("tun") || t.startsWith("ppp") || t.startsWith("tap") || t.startsWith("utun")) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                int sep = trimmed.indexOf('\t');
+                if (sep < 0) {
+                    sep = trimmed.indexOf(' ');
+                }
+                if (sep <= 0) {
+                    continue;
+                }
+                String iface = trimmed.substring(0, sep).trim();
+                if (isRealTunnelName(iface)) {
                     return true;
                 }
             }
         } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean isRealTunnelName(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        String n = name.toLowerCase(Locale.US);
+        if (n.startsWith("tunl") || n.startsWith("ip6tnl") || n.startsWith("v4-") || n.startsWith("clat")) {
+            return false;
+        }
+        return isPrefixWithDigits(n, "tun")
+            || isPrefixWithDigits(n, "ppp")
+            || isPrefixWithDigits(n, "tap")
+            || isPrefixWithDigits(n, "utun");
+    }
+
+    private static boolean isPrefixWithDigits(String value, String prefix) {
+        if (!value.startsWith(prefix) || value.length() <= prefix.length()) {
+            return false;
+        }
+        for (int i = prefix.length(); i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean hasLocalCaptureProxyPortListening() {
+        String[] portHexes = new String[] {
+            ":22b8 ", ":22c3 ", ":22a2 ", ":22ad ", ":5ba0 "
+        };
+        String[] tcpPaths = new String[] { /*O*/"/proc/net/tcp"/*O*/, /*O*/"/proc/net/tcp6"/*O*/ };
+        for (String path : tcpPaths) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String lower = line.toLowerCase(Locale.US);
+                    if (!lower.contains(" 0a ")) {
+                        continue;
+                    }
+                    for (String pHex : portHexes) {
+                        if (lower.contains(pHex)) {
+                            return true;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
         }
         return false;
     }
@@ -1505,6 +1557,8 @@ final class DsProCoreLoader {
                             || info.contains(/*O*/"netcapture"/*O*/)
                             || info.contains(/*O*/"sslcapture"/*O*/)
                             || info.contains(/*O*/"tpacketcapture"/*O*/)
+                            || info.contains(/*O*/"sandroproxy"/*O*/)
+                            || info.contains(/*O*/"stormsniffer"/*O*/)
                             || info.contains(/*O*/"httptoolkit"/*O*/)
                             || info.contains(/*O*/"movecert"/*O*/)) {
                             return true;

@@ -119,6 +119,7 @@ public final class DsProGuardProvider extends ContentProvider {
     private static volatile boolean captureNetworkGuardInstalled = false;
     private static volatile String cachedInstalledCaptureTool = null;
     private static volatile long cachedCaptureToolCheckedAt = 0L;
+    private static volatile String cachedCaptureThreat = null;
 
     private static volatile boolean resourcesMounted = false;
     private static volatile Object cachedResourcesLoader = null;
@@ -189,7 +190,7 @@ public final class DsProGuardProvider extends ContentProvider {
                     public void onActivityPreCreated(Activity activity, Bundle savedInstanceState) {
                         if (antiTampering) {
                             ensureCaptureNetworkGuardIntact(activity);
-                            String captureFailure = checkNetworkCaptureFailure(activity, false);
+                            String captureFailure = checkInMemoryCaptureThreat();
                             if (captureFailure != null) {
                                 hardKillOnThreat(captureFailure);
                             }
@@ -201,7 +202,7 @@ public final class DsProGuardProvider extends ContentProvider {
                     public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
                         if (antiTampering) {
                             ensureCaptureNetworkGuardIntact(activity);
-                            String captureFailure = checkNetworkCaptureFailure(activity, false);
+                            String captureFailure = checkInMemoryCaptureThreat();
                             if (captureFailure != null) {
                                 hardKillOnThreat(captureFailure);
                             }
@@ -219,7 +220,7 @@ public final class DsProGuardProvider extends ContentProvider {
                     public void onActivityStarted(Activity activity) {
                         if (antiTampering) {
                             ensureCaptureNetworkGuardIntact(activity);
-                            String captureFailure = checkNetworkCaptureFailure(activity, false);
+                            String captureFailure = checkInMemoryCaptureThreat();
                             if (captureFailure != null) {
                                 hardKillOnThreat(captureFailure);
                             }
@@ -237,10 +238,11 @@ public final class DsProGuardProvider extends ContentProvider {
                         }
                         if (antiTampering) {
                             ensureCaptureNetworkGuardIntact(activity);
-                            String captureFailure = checkNetworkCaptureFailure(activity, true);
+                            String captureFailure = checkInMemoryCaptureThreat();
                             if (captureFailure != null) {
                                 hardKillOnThreat(captureFailure);
                             }
+                            triggerAsyncCaptureScan(activity);
                         }
                         if (detectDebugger && isDebuggerAttached()) {
                             crashWithReason(/*O*/"Debugger detected"/*O*/);
@@ -539,6 +541,7 @@ public final class DsProGuardProvider extends ContentProvider {
                             ensureCaptureNetworkGuardIntact(appContext);
                             String captureFailure = checkNetworkCaptureFailure(appContext, (cycle % 8 == 0));
                             if (captureFailure != null) {
+                                cachedCaptureThreat = captureFailure;
                                 hardKillOnThreat(captureFailure);
                                 return;
                             }
@@ -1710,7 +1713,7 @@ public final class DsProGuardProvider extends ContentProvider {
 
         @Override
         public List<Proxy> select(URI uri) {
-            String captureFailure = checkFastNetworkCaptureFailure(appContext, false);
+            String captureFailure = checkInMemoryCaptureThreat();
             if (captureFailure != null) {
                 hardKillOnThreat(captureFailure);
                 return Collections.singletonList(blockedLoopbackProxy());
@@ -1719,10 +1722,12 @@ public final class DsProGuardProvider extends ContentProvider {
                 try {
                     List<Proxy> resolved = delegate.select(uri);
                     if (resolved != null) {
-                        for (Proxy p : resolved) {
-                            if (p != null && p.type() != Proxy.Type.DIRECT) {
-                                hardKillOnThreat(/*O*/"HTTP/SOCKS proxy capture detected"/*O*/);
-                                return Collections.singletonList(blockedLoopbackProxy());
+                        if (!isLoopbackTargetUri(uri)) {
+                            for (Proxy p : resolved) {
+                                if (p != null && p.type() != Proxy.Type.DIRECT) {
+                                    hardKillOnThreat(/*O*/"HTTP/SOCKS proxy capture detected"/*O*/);
+                                    return Collections.singletonList(blockedLoopbackProxy());
+                                }
                             }
                         }
                         if (!resolved.isEmpty()) {
@@ -1746,8 +1751,44 @@ public final class DsProGuardProvider extends ContentProvider {
         }
     }
 
+    private static boolean isLoopbackTargetUri(URI uri) {
+        if (uri == null) {
+            return false;
+        }
+        String host = uri.getHost();
+        if (host == null) {
+            return "socket".equalsIgnoreCase(uri.getScheme());
+        }
+        return "127.0.0.1".equals(host)
+            || "localhost".equalsIgnoreCase(host)
+            || "::1".equals(host)
+            || "[::1]".equals(host);
+    }
+
     private static Proxy blockedLoopbackProxy() {
         return new Proxy(Proxy.Type.HTTP, new InetSocketAddress(InetAddress.getLoopbackAddress(), 9));
+    }
+
+    private static void triggerAsyncCaptureScan(final Context context) {
+        if (context == null || Process.isIsolated()) {
+            return;
+        }
+        final Context appCtx = context.getApplicationContext() != null ? context.getApplicationContext() : context;
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String err = checkNetworkCaptureFailure(appCtx, true);
+                    if (err != null) {
+                        cachedCaptureThreat = err;
+                        hardKillOnThreat(err);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }, /*O*/"dspro-cap-scan"/*O*/);
+        t.setDaemon(true);
+        t.start();
     }
 
     private static synchronized void installCaptureResistantNetworkGuard(Context context) {
@@ -1775,12 +1816,22 @@ public final class DsProGuardProvider extends ContentProvider {
             if (!(current instanceof GuardedProxySelector)) {
                 if (current != null) {
                     String cls = safeLower(current.getClass().getName());
-                    if (cls.contains(/*O*/"proxy"/*O*/)
-                        || cls.contains(/*O*/"canary"/*O*/)
+                    if (cls.contains(/*O*/"canary"/*O*/)
                         || cls.contains(/*O*/"reqable"/*O*/)
+                        || cls.contains(/*O*/"pcapdroid"/*O*/)
+                        || cls.contains(/*O*/"sslcapture"/*O*/)
+                        || cls.contains(/*O*/"greyshirts"/*O*/)
+                        || cls.contains(/*O*/"proxypin"/*O*/)
+                        || cls.contains(/*O*/"netcapture"/*O*/)
+                        || cls.contains(/*O*/"tpacketcapture"/*O*/)
+                        || cls.contains(/*O*/"charles"/*O*/)
+                        || cls.contains(/*O*/"fiddler"/*O*/)
+                        || cls.contains(/*O*/"mitmproxy"/*O*/)
                         || cls.contains(/*O*/"xposed"/*O*/)
                         || cls.contains(/*O*/"lsposed"/*O*/)
-                        || cls.contains(/*O*/"hook"/*O*/)) {
+                        || cls.contains(/*O*/"edhooker"/*O*/)
+                        || cls.contains(/*O*/"sandhook"/*O*/)
+                        || cls.contains(/*O*/"frida"/*O*/)) {
                         hardKillOnThreat(/*O*/"Network proxy selector override detected"/*O*/);
                         return;
                     }
@@ -1801,6 +1852,37 @@ public final class DsProGuardProvider extends ContentProvider {
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    private static String checkInMemoryCaptureThreat() {
+        if (cachedCaptureThreat != null) {
+            return cachedCaptureThreat;
+        }
+        if (cachedInstalledCaptureTool != null) {
+            return /*O*/"Packet capture tool detected ("/*O*/ + cachedInstalledCaptureTool + ")";
+        }
+        String propHost = firstNonEmpty(
+            System.getProperty(/*O*/"http.proxyHost"/*O*/),
+            System.getProperty(/*O*/"https.proxyHost"/*O*/),
+            System.getProperty(/*O*/"socksProxyHost"/*O*/),
+            System.getProperty(/*O*/"ftp.proxyHost"/*O*/)
+        );
+        if (!propHost.isEmpty()) {
+            return /*O*/"HTTP/SOCKS proxy capture detected ("/*O*/ + propHost + ")";
+        }
+
+        String envProxy = firstNonEmpty(
+            System.getenv(/*O*/"http_proxy"/*O*/),
+            System.getenv(/*O*/"https_proxy"/*O*/),
+            System.getenv(/*O*/"HTTP_PROXY"/*O*/),
+            System.getenv(/*O*/"HTTPS_PROXY"/*O*/),
+            System.getenv(/*O*/"ALL_PROXY"/*O*/),
+            System.getenv(/*O*/"all_proxy"/*O*/)
+        );
+        if (!envProxy.isEmpty()) {
+            return /*O*/"Network proxy environment capture detected"/*O*/;
+        }
+        return null;
     }
 
     private static String checkNetworkCaptureFailure(Context context, boolean deepScan) {
@@ -1835,9 +1917,6 @@ public final class DsProGuardProvider extends ContentProvider {
         )) {
             return /*O*/"Packet capture tunnel socket active"/*O*/;
         }
-        if (hasLocalCaptureProxyPortListening()) {
-            return /*O*/"Local packet capture proxy port listening"/*O*/;
-        }
         String hookErr = checkNetworkSslHooks();
         if (hookErr != null) {
             return hookErr;
@@ -1846,29 +1925,9 @@ public final class DsProGuardProvider extends ContentProvider {
     }
 
     private static String checkFastNetworkCaptureFailure(Context context, boolean includeProxySelectorProbe) {
-        if (cachedInstalledCaptureTool != null) {
-            return /*O*/"Packet capture tool detected ("/*O*/ + cachedInstalledCaptureTool + ")";
-        }
-        String propHost = firstNonEmpty(
-            System.getProperty(/*O*/"http.proxyHost"/*O*/),
-            System.getProperty(/*O*/"https.proxyHost"/*O*/),
-            System.getProperty(/*O*/"socksProxyHost"/*O*/),
-            System.getProperty(/*O*/"ftp.proxyHost"/*O*/)
-        );
-        if (!propHost.isEmpty()) {
-            return /*O*/"HTTP/SOCKS proxy capture detected ("/*O*/ + propHost + ")";
-        }
-
-        String envProxy = firstNonEmpty(
-            System.getenv(/*O*/"http_proxy"/*O*/),
-            System.getenv(/*O*/"https_proxy"/*O*/),
-            System.getenv(/*O*/"HTTP_PROXY"/*O*/),
-            System.getenv(/*O*/"HTTPS_PROXY"/*O*/),
-            System.getenv(/*O*/"ALL_PROXY"/*O*/),
-            System.getenv(/*O*/"all_proxy"/*O*/)
-        );
-        if (!envProxy.isEmpty()) {
-            return /*O*/"Network proxy environment capture detected"/*O*/;
+        String inMem = checkInMemoryCaptureThreat();
+        if (inMem != null) {
+            return inMem;
         }
 
         String activeTunnel = findActiveCaptureTunnelInterface();
@@ -1909,9 +1968,11 @@ public final class DsProGuardProvider extends ContentProvider {
             if (tool != null) {
                 return /*O*/"Packet capture tool active ("/*O*/ + tool + /*O*/" VPN)"/*O*/;
             }
-            return /*O*/"Packet capture / VPN tunnel blocked ("/*O*/
-                + (activeTunnel != null ? activeTunnel : /*O*/"VPN"/*O*/)
-                + ")";
+            if (hasLocalCaptureProxyPortListening()) {
+                return /*O*/"Packet capture VPN tunnel blocked ("/*O*/
+                    + (activeTunnel != null ? activeTunnel : /*O*/"VPN"/*O*/)
+                    + ")";
+            }
         }
 
         if (includeProxySelectorProbe) {
@@ -1951,7 +2012,7 @@ public final class DsProGuardProvider extends ContentProvider {
             return false;
         }
         String host = info.getHost();
-        if (host != null && !host.trim().isEmpty()) {
+        if (host != null && !host.trim().isEmpty() && info.getPort() > 0) {
             return true;
         }
         Uri pac = info.getPacFileUrl();
@@ -1969,40 +2030,61 @@ public final class DsProGuardProvider extends ContentProvider {
                 if (!nif.getInetAddresses().hasMoreElements()) {
                     continue;
                 }
-                String name = safeLower(nif.getName());
-                if (name.startsWith("tun")
-                    || name.startsWith("ppp")
-                    || name.startsWith("tap")
-                    || name.startsWith("utun")) {
+                if (isRealTunnelName(nif.getName())) {
                     return nif.getName();
                 }
             }
         } catch (Throwable ignored) {
         }
-        String[] netFiles = new String[] { /*O*/"/proc/net/dev"/*O*/, /*O*/"/proc/net/route"/*O*/ };
-        for (String netFile : netFiles) {
-            try (BufferedReader reader = new BufferedReader(new FileReader(netFile))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    String trimmed = line.trim().toLowerCase(Locale.US);
-                    if (trimmed.startsWith("tun")
-                        || trimmed.startsWith("ppp")
-                        || trimmed.startsWith("tap")
-                        || trimmed.startsWith("utun")) {
-                        int sep = trimmed.indexOf(':');
-                        if (sep < 0) {
-                            sep = trimmed.indexOf('\t');
-                        }
-                        if (sep < 0) {
-                            sep = trimmed.indexOf(' ');
-                        }
-                        return sep > 0 ? trimmed.substring(0, sep).trim() : /*O*/"tun"/*O*/;
-                    }
+        try (BufferedReader reader = new BufferedReader(new FileReader(/*O*/"/proc/net/route"/*O*/))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
                 }
-            } catch (Throwable ignored) {
+                int sep = trimmed.indexOf('\t');
+                if (sep < 0) {
+                    sep = trimmed.indexOf(' ');
+                }
+                if (sep <= 0) {
+                    continue;
+                }
+                String iface = trimmed.substring(0, sep).trim();
+                if (isRealTunnelName(iface)) {
+                    return iface;
+                }
             }
+        } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    private static boolean isRealTunnelName(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        String n = name.toLowerCase(Locale.US);
+        if (n.startsWith("tunl") || n.startsWith("ip6tnl") || n.startsWith("v4-") || n.startsWith("clat")) {
+            return false;
+        }
+        return isPrefixWithDigits(n, "tun")
+            || isPrefixWithDigits(n, "ppp")
+            || isPrefixWithDigits(n, "tap")
+            || isPrefixWithDigits(n, "utun");
+    }
+
+    private static boolean isPrefixWithDigits(String value, String prefix) {
+        if (!value.startsWith(prefix) || value.length() <= prefix.length()) {
+            return false;
+        }
+        for (int i = prefix.length(); i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String findInstalledCaptureToolLabel(Context context, boolean forceRefresh) {
@@ -2173,12 +2255,12 @@ public final class DsProGuardProvider extends ContentProvider {
             HostnameVerifier hv = HttpsURLConnection.getDefaultHostnameVerifier();
             if (hv != null) {
                 String hvName = safeLower(hv.getClass().getName());
-                if (hvName.contains(/*O*/"allowall"/*O*/)
-                    || hvName.contains(/*O*/"trustall"/*O*/)
-                    || hvName.contains(/*O*/"justtrustme"/*O*/)
+                if (hvName.contains(/*O*/"justtrustme"/*O*/)
+                    || hvName.contains(/*O*/"trustmealready"/*O*/)
                     || hvName.contains(/*O*/"sslunpin"/*O*/)
                     || hvName.contains(/*O*/"xposed"/*O*/)
-                    || hvName.contains(/*O*/"lsposed"/*O*/)) {
+                    || hvName.contains(/*O*/"lsposed"/*O*/)
+                    || hvName.contains(/*O*/"frida"/*O*/)) {
                     return /*O*/"SSL hostname verification bypass detected"/*O*/;
                 }
             }
@@ -2192,8 +2274,7 @@ public final class DsProGuardProvider extends ContentProvider {
             /*O*/"httpcanary"/*O*/,
             /*O*/"reqable"/*O*/,
             /*O*/"pcapdroid"/*O*/,
-            /*O*/"frida-agent"/*O*/,
-            /*O*/"lsposed"/*O*/
+            /*O*/"frida-agent"/*O*/
         )) {
             return /*O*/"Runtime network capture / SSL bypass module detected"/*O*/;
         }
